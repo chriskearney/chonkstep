@@ -46,10 +46,12 @@
 //! pointer position against global rects, and the surface-local
 //! coordinates it hands the shell, `wm-core`, and the seat are all
 //! differences of two global points, so a window on a monitor whose
-//! origin is (1920, 0) resolves exactly like one at the origin. The
-//! only place output geometry appears at all is confining the pointer
-//! ([`confine_to_outputs`]), which is the one question — "where is the
-//! pointer allowed to be" — that the physical layout genuinely answers.
+//! origin is (1920, 0) resolves exactly like one at the origin. Output
+//! geometry appears in two places only, the two questions the physical
+//! layout genuinely answers: confining the pointer
+//! ([`confine_to_outputs`]) — "where is the pointer allowed to be" — and
+//! placing a touchscreen's or a tablet's position on what it covers
+//! ([`absolute`]).
 //!
 //! The cross-event routing state ([`InputState`]) lives in the seat's
 //! user-data map rather than as a `Compositor` field: the seat is the
@@ -57,6 +59,7 @@
 //! it for free, and the handlers here stay the only code that can see
 //! it.
 
+pub(crate) mod absolute;
 pub(crate) mod constraints;
 pub(crate) mod cursor_visibility;
 pub(crate) mod devices;
@@ -1005,12 +1008,27 @@ fn switch_resets_idle(switch: Option<Switch>, on: bool) -> bool {
 
 // -- touch --------------------------------------------------------------
 
+/// Where a touchscreen's or a tablet tool's position lands (see
+/// [`absolute`]). `configured` is the output the configuration binds
+/// that class of device to, and `unbound` what the class covers without
+/// one.
+fn absolute_position<I: InputBackend, E: AbsolutePositionEvent<I>>(
+    state: &Compositor,
+    event: &E,
+    configured: Option<&str>,
+    unbound: absolute::Unbound,
+) -> LogicalPoint<f64, Logical> {
+    let associated = crate::session::device_output(&state.graphics, || event.device().id());
+    let area = absolute::area(state, configured, associated, unbound);
+    area.place(event.position_transformed(area.device_size()))
+}
+
 fn touch_position<I: InputBackend, E: AbsolutePositionEvent<I>>(
     state: &Compositor,
     event: &E,
 ) -> LogicalPoint<f64, Logical> {
-    let size = state.wm.backend().output_size;
-    event.position_transformed((size.w as i32, size.h as i32).into())
+    let configured = state.wm.backend().pointer_config.touch_output.as_deref();
+    absolute_position::<I, E>(state, event, configured, absolute::Unbound::Panel)
 }
 
 fn on_touch_down<I: InputBackend>(state: &mut Compositor, event: I::TouchDownEvent) {
@@ -1226,8 +1244,8 @@ fn tablet_handles<I: InputBackend, E: TabletToolEvent<I>>(
 }
 
 fn tablet_position<I: InputBackend, E: TabletToolEvent<I>>(state: &Compositor, event: &E) -> LogicalPoint<f64, Logical> {
-    let size = state.wm.backend().output_size;
-    event.position_transformed((size.w as i32, size.h as i32).into())
+    let configured = state.wm.backend().pointer_config.tablet_output.as_deref();
+    absolute_position::<I, E>(state, event, configured, absolute::Unbound::Desktop)
 }
 
 fn tablet_focus(
@@ -1710,11 +1728,10 @@ fn combo_modifiers(mods: &ModifiersState) -> Modifiers {
 ///
 /// The transform is against the *whole* global space (every monitor's
 /// union), not one screen: for the nested backend those are the same
-/// rectangle, and for an absolute device on a real session — a
-/// touchscreen, a tablet — spanning the desktop is what an unconfigured
-/// one does everywhere. Mapping a tablet to a single output is a
-/// libinput device-configuration feature this session does not read
-/// yet.
+/// rectangle, and an absolute pointer on a real session, such as the
+/// tablet a virtual machine emulates, spans the whole desktop its window
+/// shows. Touchscreens and tablet tools arrive as their own events and
+/// are placed by [`absolute`].
 fn on_pointer_move_absolute<I: InputBackend>(state: &mut Compositor, event: I::PointerMotionAbsoluteEvent) {
     let size = state.wm.backend().output_size;
     let position = event.position_transformed((size.w as i32, size.h as i32).into());

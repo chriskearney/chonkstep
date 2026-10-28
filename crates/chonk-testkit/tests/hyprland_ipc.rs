@@ -537,7 +537,8 @@ fn typing_and_touch_hide_the_pointer_until_it_moves() {
     assert!(shown(&mut session, "invisible-released"));
 
     // On the dialog's label, which a tap leaves alone; its buttons would close it.
-    session.door().touch_down(0, 220.0, 110.0).unwrap();
+    let (u, v) = session.world().unwrap().touch_fraction(220.0, 110.0);
+    session.door().touch_down(0, u, v).unwrap();
     session.door().touch_frame().unwrap();
     session.door().touch_up(0).unwrap();
     session.door().touch_frame().unwrap();

@@ -761,6 +761,21 @@ device name, never as Lua, and becomes the same rule. The toggles reach the
 running session through `hyprctl eval hl.device(…)`, described in
 [hyprland-ipc.md](hyprland-ipc.md).
 
+A touchscreen covers one output: a touch at some fraction of the digitiser
+lands at that fraction of its output, turned with the output when it is
+rotated. `input:touchdevice:output` and `input:tablet:output`
+(`touchdevice { output = … }` and `tablet { output = … }` inside `input {}`,
+or the `touchdevice` and `tablet` tables in Lua) name an output by connector,
+as `hyprctl monitors` lists it, for touchscreens and for tablets. Without
+one, or when the named output is not connected, a device covers the output
+udev ties it to (its `WL_OUTPUT` property). With neither, the defaults are
+Hyprland's: a touchscreen covers the first built-in panel (`eDP-*`, `LVDS-*`
+or `DSI-*`), else the primary, and a tablet spans the whole layout, so a
+drawing tablet beside two monitors reaches both. `[[Auto]]`, `[[Empty]]` and
+an empty value keep those defaults, and `current` is refused. The other keys
+of those tables (`transform`, `region_position`, `region_size` and the rest)
+are logged and skipped.
+
 Scrolling is configured per device class. `input:natural_scroll` and
 `input:scroll_factor` (or `[input]` in `config.toml`) apply to mice,
 trackpoints and every other device that is not a touchpad;

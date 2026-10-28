@@ -24,8 +24,9 @@ use smithay::reexports::wayland_server::protocol::{wl_output::WlOutput, wl_point
 use smithay::reexports::wayland_server::{
     backend::GlobalId, Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
-use smithay::utils::{Logical, Point as LogicalPoint};
+use smithay::utils::{Logical, Point as LogicalPoint, Transform};
 
+use crate::input::absolute::Area;
 use crate::state::Compositor;
 
 const VERSION: u32 = 2;
@@ -102,32 +103,22 @@ fn absolute_position(
     y_extent: u32,
 ) -> LogicalPoint<f64, Logical> {
     let output = output.and_then(Output::from_resource);
-    let (origin_x, origin_y, width, height) = output
+    // The client already speaks the output's logical orientation, so,
+    // unlike a touchscreen's, this area is never turned.
+    let area = output
         .as_ref()
-        .and_then(|wanted| {
-            comp.outputs
-                .iter()
-                .find(|entry| &entry.output == wanted)
-                .map(|entry| {
-                    (
-                        entry.position.x,
-                        entry.position.y,
-                        entry.size.w,
-                        entry.size.h,
-                    )
-                })
-        })
-        .unwrap_or((
-            0,
-            0,
-            comp.wm.backend().output_size.w,
-            comp.wm.backend().output_size.h,
-        ));
-    (
-        f64::from(origin_x) + map_absolute_axis(x, x_extent, width),
-        f64::from(origin_y) + map_absolute_axis(y, y_extent, height),
+        .and_then(|wanted| comp.outputs.iter().find(|entry| &entry.output == wanted))
+        .map_or_else(
+            || Area::desktop(comp.wm.backend().output_size),
+            |entry| Area { transform: Transform::Normal, ..Area::of_output(entry) },
+        );
+    area.place(
+        (
+            map_absolute_axis(x, x_extent, area.rect.size.w),
+            map_absolute_axis(y, y_extent, area.rect.size.h),
+        )
+            .into(),
     )
-        .into()
 }
 
 fn flush(comp: &mut Compositor, data: &PointerData) {

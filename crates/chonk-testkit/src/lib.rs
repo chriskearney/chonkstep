@@ -1282,6 +1282,13 @@ pub struct OverviewWindowInfo {
 }
 
 impl World {
+    /// The digitiser position, as fractions of its width and height, that
+    /// a touch reports to land at global `(x, y)` while the session has
+    /// one output covering the whole layout, as the nested one starts.
+    pub fn touch_fraction(&self, x: f64, y: f64) -> (f64, f64) {
+        (x / f64::from(self.output_w), y / f64::from(self.output_h))
+    }
+
     /// The first mapped window whose app id or title contains
     /// `needle`.
     pub fn window_matching(&self, needle: &str) -> Option<&WindowInfo> {
@@ -1594,14 +1601,16 @@ impl Door {
         })
     }
 
-    /// Touch-down in global output coordinates, through the real backend route.
-    pub fn touch_down(&mut self, slot: u32, x: f64, y: f64) -> Result<(), String> {
-        self.send(&format!("touch down {slot} {x} {y}"))
+    /// Touch-down at `(u, v)`, fractions of the digitiser's width and
+    /// height, through the real backend route: the compositor maps it onto
+    /// the output a touchscreen covers. See [`World::touch_fraction`].
+    pub fn touch_down(&mut self, slot: u32, u: f64, v: f64) -> Result<(), String> {
+        self.send(&format!("touch down {slot} {u} {v}"))
     }
 
     /// Move a held touch slot; the client must retain its original focus.
-    pub fn touch_motion(&mut self, slot: u32, x: f64, y: f64) -> Result<(), String> {
-        self.send(&format!("touch motion {slot} {x} {y}"))
+    pub fn touch_motion(&mut self, slot: u32, u: f64, v: f64) -> Result<(), String> {
+        self.send(&format!("touch motion {slot} {u} {v}"))
     }
 
     /// Release a held touch slot.

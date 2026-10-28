@@ -679,6 +679,16 @@ pub struct PointerConfig {
     pub drag_lock: Option<bool>,
     pub tap_button_map: Option<TapButtonMap>,
     pub drag_3fg: Option<MultiFingerDrag>,
+    /// `input:touchdevice:output`: the output a touchscreen covers, by
+    /// connector name. Unset, or naming an output that is not connected,
+    /// the output udev ties the device to covers it, else the first
+    /// built-in panel, else the primary.
+    pub touch_output: Option<String>,
+    /// `input:tablet:output`: the output a tablet's tools cover. Unset,
+    /// or naming an output that is not connected, the output udev ties
+    /// the device to covers it, else the whole layout, as Hyprland's
+    /// empty default spans every monitor.
+    pub tablet_output: Option<String>,
     /// Rules for single devices, laid over everything above.
     pub devices: Vec<DeviceRule>,
 }
