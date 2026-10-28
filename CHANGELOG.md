@@ -5,6 +5,15 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- An external display whose EDID can only be read after it is set up,
+  which Apple's display driver does at login and after a dock retrains
+  its links, is probed again for about 16 seconds and adopted again
+  under its real make, model and serial once the EDID arrives. Before,
+  it stayed `Unknown` for the whole session, so `desc:` monitor rules
+  and kanshi profiles never matched it.
+- wlr-output-management heads carry the display's serial number, so
+  kanshi and other clients can tell two identical monitors apart.
+
 ## [0.7.2] - 2026-10-06
 
 - At startup, watch udev for display changes before the first connector
