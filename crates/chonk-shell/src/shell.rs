@@ -1500,6 +1500,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             drag_lock: next.input.drag_lock,
             tap_button_map: next.input.tap_button_map,
             drag_3fg: next.input.drag_3fg,
+            touch_output: next.input.touch_output.clone(),
+            tablet_output: next.input.tablet_output.clone(),
             devices: next.input.devices.clone(),
         });
         // ...and then re-ask for every window already on the desk. A

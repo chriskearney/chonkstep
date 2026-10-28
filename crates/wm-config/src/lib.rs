@@ -461,6 +461,10 @@ pub struct InputConfig {
     pub drag_lock: Option<bool>,
     pub tap_button_map: Option<wm_core::TapButtonMap>,
     pub drag_3fg: Option<wm_core::MultiFingerDrag>,
+    /// The outputs a touchscreen and a tablet cover, by connector name
+    /// (`input:touchdevice:output`, `input:tablet:output`).
+    pub touch_output: Option<String>,
+    pub tablet_output: Option<String>,
     /// Rules for single devices by exact name: Hyprland's `device` blocks and
     /// `hl.device` calls, and Omarchy's persisted touchpad and touchscreen
     /// disables.

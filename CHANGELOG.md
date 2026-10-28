@@ -5,6 +5,14 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- A touchscreen covers one output instead of the whole monitor layout, so a
+  tap on a laptop's own panel lands there while an external display is
+  connected. The output is the one `input:touchdevice:output` names, else
+  the one udev ties the device to, else the built-in panel, else the
+  primary, and a rotated output turns the touch with it. A drawing tablet
+  still spans the whole layout by default, as in Hyprland, and
+  `input:tablet:output` or udev can bind it to one output.
+
 ## [0.7.2] - 2026-10-06
 
 - At startup, watch udev for display changes before the first connector

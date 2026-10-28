@@ -1022,6 +1022,70 @@ fn out_of_range_touchpad_and_pointer_values_are_refused_by_name() {
     assert!(reading.skipped.is_empty(), "{:?}", reading.skipped);
 }
 
+/// A touchscreen and a tablet are each bound to an output by connector
+/// name, written either way. Hyprland's placeholders keep the default
+/// mapping, `current` is refused by name, and the other keys of those
+/// tables are still reported as not implemented.
+#[test]
+fn touch_and_tablet_outputs_are_read_from_either_syntax() {
+    let lua = scratch("absolute-outputs-lua");
+    write(
+        &lua.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.config({ input = {
+  touchdevice = { output = "eDP-1", transform = 1 },
+  tablet = { output = "DP-2", region_size = "100 100" },
+} })
+"#,
+    );
+    let conf = scratch("absolute-outputs-conf");
+    write(
+        &conf.join(".config/hypr/hyprland.conf"),
+        concat!(
+            "input {\n",
+            "    touchdevice {\n",
+            "        output = eDP-1\n",
+            "        transform = 1\n",
+            "    }\n",
+            "    tablet {\n",
+            "        output = DP-2\n",
+            "        region_size = 100 100\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    for root in [lua, conf] {
+        let reading = read(&Roots::under(&root));
+        assert_eq!(reading.input.touch_output.as_deref(), Some("eDP-1"), "{root:?}: {:?}", reading.skipped);
+        assert_eq!(reading.input.tablet_output.as_deref(), Some("DP-2"), "{root:?}");
+        for key in ["touchdevice:transform", "tablet:region_size"] {
+            assert!(
+                skipped_why(&reading, key).is_some_and(|why| why.contains("not implemented")),
+                "{root:?}: {key}: {:?}",
+                reading.skipped
+            );
+        }
+        let config = crate::parse_with("desktop = \"omarchy\"", &|| Some(read(&Roots::under(&root)))).unwrap();
+        assert_eq!(config.input.touch_output.as_deref(), Some("eDP-1"), "{root:?}");
+        assert_eq!(config.input.tablet_output.as_deref(), Some("DP-2"), "{root:?}");
+    }
+    for value in ["", "[[Auto]]", "[[Empty]]"] {
+        let mut reading = Reading::default();
+        input(&mut reading, "touchdevice:output", value);
+        input(&mut reading, "tablet:output", value);
+        assert_eq!(reading.input, crate::InputConfig::default(), "{value:?}");
+        assert!(reading.skipped.is_empty(), "{value:?}: {:?}", reading.skipped);
+    }
+    let mut reading = Reading::default();
+    input(&mut reading, "tablet:output", "current");
+    assert_eq!(reading.input, crate::InputConfig::default());
+    assert!(
+        skipped_why(&reading, "tablet:output = current").is_some_and(|why| why.contains("follows focus")),
+        "{:?}",
+        reading.skipped
+    );
+}
+
 /// A device rule reaches one device by its exact name, written either way,
 /// merges with a later rule for the same name, and keeps only the settings a
 /// rule can carry.

@@ -919,6 +919,9 @@ pub(crate) struct SessionGraphics {
     /// Live libinput device handles retained so config reloads can
     /// update already-connected hardware, not only future hotplug.
     input_devices: Vec<libinput_crate::Device>,
+    /// The output udev ties a device to, by sysname, for each device
+    /// that has one: read once as it appears, for `input::absolute`.
+    device_outputs: Vec<(String, String)>,
     /// When [`service_pending_flips`] last ran. The gap between
     /// consecutive visits is how long the main thread was away, which
     /// is time no flip should be charged for — see [`LOOP_BLOCK_GRACE`].
@@ -1892,6 +1895,7 @@ pub(crate) fn init(
         outputs: session_outputs,
         libinput,
         input_devices: Vec::new(),
+        device_outputs: Vec::new(),
         last_service: Instant::now(),
         strict_release,
         lid,
@@ -3349,6 +3353,12 @@ fn note_libinput_device(comp: &mut Compositor, event: &InputEvent<LibinputInputB
             let mut device = device.clone();
             configure_libinput_device(&mut device, &config, comp.touchpad_pointer_captured);
             if let Graphics::Session(session) = &mut comp.graphics {
+                let sysname = device.sysname().to_string();
+                session.device_outputs.retain(|(held, _)| *held != sysname);
+                if let Some(output) = associated_output(&device) {
+                    tracing::info!(device = device.name(), %output, "udev ties this input device to an output");
+                    session.device_outputs.push((sysname, output));
+                }
                 if !session.input_devices.iter().any(|held| held.sysname() == device.sysname()) {
                     session.input_devices.push(device);
                 }
@@ -3357,10 +3367,45 @@ fn note_libinput_device(comp: &mut Compositor, event: &InputEvent<LibinputInputB
         InputEvent::DeviceRemoved { device } => {
             if let Graphics::Session(session) = &mut comp.graphics {
                 session.input_devices.retain(|held| held.sysname() != device.sysname());
+                session.device_outputs.retain(|(held, _)| held != device.sysname());
             }
         }
         _ => {}
     }
+}
+
+/// The output udev ties `device` to: its `WL_OUTPUT` property, which
+/// libinput reports as the device's output name. Read through the C call
+/// rather than `Device::output_name`, which panics on a value that is not
+/// UTF-8; the property is a udev rule's text, and one bad rule must not
+/// take the session down.
+fn associated_output(device: &libinput_crate::Device) -> Option<String> {
+    use libinput_crate::AsRaw;
+    // SAFETY: the handle is this `Device`'s own, which holds a libinput
+    // reference for as long as `device` is borrowed, and the call only
+    // reads a property libinput stored when the device was added.
+    let name = unsafe { libinput_crate::ffi::libinput_device_get_output_name(device.as_raw_mut()) };
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, so a NUL-terminated string the device owns and
+    // keeps while `device` is borrowed; it is copied before that ends.
+    let name = unsafe { std::ffi::CStr::from_ptr(name) };
+    name.to_str().ok().filter(|name| !name.is_empty()).map(str::to_owned)
+}
+
+/// The output udev ties the device `id` names to, if it ties one. `id` is
+/// asked for only while some device has an output, so a desk without such
+/// a udev rule never builds one per event.
+pub(crate) fn device_output(graphics: &Graphics, id: impl FnOnce() -> String) -> Option<&str> {
+    let Graphics::Session(session) = graphics else {
+        return None;
+    };
+    if session.device_outputs.is_empty() {
+        return None;
+    }
+    let id = id();
+    session.device_outputs.iter().find(|(held, _)| *held == id).map(|(_, output)| output.as_str())
 }
 
 pub(crate) fn apply_pointer_config(graphics: &mut Graphics, config: &wm_core::PointerConfig, captured: bool) {

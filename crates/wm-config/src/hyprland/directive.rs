@@ -214,6 +214,11 @@ pub enum Include {
     StateDirectory { relative: String, exclude: Vec<String> },
 }
 
+/// The device classes `input {}` nests a table for, whose keys reach
+/// [`Directive::Input`] prefixed with the class: `touchpad:natural_scroll`,
+/// `touchdevice:output`, `tablet:output`.
+pub(crate) const INPUT_DEVICE_CLASSES: [&str; 3] = ["touchpad", "touchdevice", "tablet"];
+
 /// The most bytes a workspace selector may be before it is refused
 /// unread. A number is at most two digits; anything longer is not one.
 const MAX_WORKSPACE_SELECTOR: usize = 64;

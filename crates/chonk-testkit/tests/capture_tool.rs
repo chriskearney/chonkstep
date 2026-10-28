@@ -1162,7 +1162,8 @@ fn retained_area_moves_resizes_and_blocks_desktop_gestures() {
         session.door().swipe_update(-100.0, 0.0).unwrap();
     }
     session.door().swipe_end(false).unwrap();
-    session.door().touch_down(0, 400.0, 300.0).unwrap();
+    let (u, v) = session.world().unwrap().touch_fraction(400.0, 300.0);
+    session.door().touch_down(0, u, v).unwrap();
     session.door().touch_up(0).unwrap();
     session.door().touch_frame().unwrap();
     session.door().barrier().unwrap();

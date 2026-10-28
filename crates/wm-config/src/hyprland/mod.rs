@@ -1375,6 +1375,8 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
             Some(drag) => reading.input.drag_3fg = Some(drag),
             None => refuse_input(reading, name, &value, "drag_3fg must be 0 (off), 1 (three fingers) or 2 (four fingers)"),
         },
+        "touchdevice:output" => reading.input.touch_output = absolute_output(reading, name, &value),
+        "tablet:output" => reading.input.tablet_output = absolute_output(reading, name, &value),
         "scroll_method" => match wm_core::ScrollMethod::from_name(&value) {
             Some(method) => reading.input.scroll_method = Some(method),
             None => refuse_input(reading, name, &value, "scroll method must be 2fg, edge, on_button_down or no_scroll"),
@@ -1414,6 +1416,20 @@ fn parse_input_bool(
             what: format!("{name} = {value}"),
             why: "input toggle must be true or false".into(),
         }),
+    }
+}
+
+/// `touchdevice:output` or `tablet:output`: a connector name. Hyprland's
+/// own placeholders and an empty value keep the default mapping, and
+/// `current`, a tablet that follows focus, is refused by name.
+fn absolute_output(reading: &mut Reading, name: &str, value: &str) -> Option<String> {
+    match value.trim() {
+        "" | "[[Auto]]" | "[[Empty]]" => None,
+        "current" => {
+            refuse_input(reading, name, value, "an output that follows focus is not implemented; name a connector");
+            None
+        }
+        connector => Some(connector.to_string()),
     }
 }
 

@@ -237,12 +237,15 @@ fn a_touch_drag_uses_its_own_serial_while_a_mouse_button_is_held() {
     drag.session.door().button("left", true).unwrap();
     wait_event(&drag.session, 0, &["press"]);
 
+    let world = drag.session.world().unwrap();
     let (x, y) = drag.global(CARRY);
-    drag.session.door().touch_down(0, f64::from(x), f64::from(y)).unwrap();
+    let (u, v) = world.touch_fraction(f64::from(x), f64::from(y));
+    drag.session.door().touch_down(0, u, v).unwrap();
     wait_line(&drag.session, "icon committed");
     let carried = (230.0, 170.0);
     let (x, y) = drag.global(carried);
-    drag.session.door().touch_motion(0, f64::from(x), f64::from(y)).unwrap();
+    let (u, v) = world.touch_fraction(f64::from(x), f64::from(y));
+    drag.session.door().touch_motion(0, u, v).unwrap();
     wait_event(&drag.session, 0, &["dnd-enter", "dnd-motion"]);
     wait_line(&drag.session, "icon frame done");
 

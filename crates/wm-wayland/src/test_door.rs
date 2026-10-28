@@ -63,7 +63,7 @@
 //! | `button left\|middle\|right press\|release` | pointer button by name |
 //! | `pointer-device add\|remove NAME` | hotplugs a keyless pointer called NAME (one word), for per-device rules |
 //! | `from NAME motion X Y` / `from NAME button …` | the same pointer commands, reported by the pointer called NAME |
-//! | `touch down\|motion SLOT X Y` | touch position in global output coordinates |
+//! | `touch down\|motion SLOT U V` | touch position as fractions of the digitiser's width and height, mapped onto the output it covers like a real touchscreen's |
 //! | `touch up SLOT` | release a touch slot |
 //! | `touch cancel\|frame` | cancel the touch sequence or finish its input frame |
 //! | `switch lid\|tablet-mode on\|off NAME` | a hardware switch toggle from a switch device named NAME (spaces allowed, at most 256 bytes) |
@@ -311,6 +311,9 @@ impl PointerMotionAbsoluteEvent<TestInput> for TestMotionEvent {}
 
 /// Synthetic touch events go through the same backend dispatch as libinput.
 /// Slots are explicit so the suite can prove independent multi-touch routes.
+/// The position is a fraction of the digitiser's width and height, as
+/// libinput's is, and is scaled to whatever size the compositor asks for,
+/// so the suite runs the same mapping onto an output a touchscreen does.
 #[derive(Debug)]
 pub(crate) struct TestTouchEvent {
     position: TestMotionEvent,
@@ -325,8 +328,8 @@ impl Event<TestInput> for TestTouchEvent {
 impl AbsolutePositionEvent<TestInput> for TestTouchEvent {
     fn x(&self) -> f64 { self.position.x }
     fn y(&self) -> f64 { self.position.y }
-    fn x_transformed(&self, _width: i32) -> f64 { self.position.x }
-    fn y_transformed(&self, _height: i32) -> f64 { self.position.y }
+    fn x_transformed(&self, width: i32) -> f64 { self.position.x * f64::from(width) }
+    fn y_transformed(&self, height: i32) -> f64 { self.position.y * f64::from(height) }
 }
 
 impl TouchEvent<TestInput> for TestTouchEvent {
@@ -672,7 +675,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                         let (Some(Ok(x)), Some(Ok(y))) =
                             (words.next().map(str::parse::<f64>), words.next().map(str::parse::<f64>))
                         else {
-                            reply_err(stream, "touch down|motion wants SLOT X Y");
+                            reply_err(stream, "touch down|motion wants SLOT U V");
                             return;
                         };
                         if !x.is_finite() || !y.is_finite() {

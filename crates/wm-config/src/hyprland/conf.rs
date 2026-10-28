@@ -34,7 +34,7 @@
 //! rather than by keyword, since 0.53 reused the `windowrule` keyword
 //! for the new form.
 
-use super::directive::{BindFlags, Directive, Dispatcher, Include, Matcher, Monitor, WindowRule};
+use super::directive::{BindFlags, Directive, Dispatcher, Include, Matcher, Monitor, WindowRule, INPUT_DEVICE_CLASSES};
 
 /// Reads one `.conf` file's text into directives.
 ///
@@ -102,7 +102,7 @@ pub fn read(
             } else if block
                 .first()
                 .is_some_and(|root| root.eq_ignore_ascii_case("input"))
-                && !name.eq_ignore_ascii_case("touchpad")
+                && !INPUT_DEVICE_CLASSES.iter().any(|class| name.eq_ignore_ascii_case(class))
             {
                 out.push(Directive::Ignored {
                     kind: "input",
@@ -217,8 +217,10 @@ pub fn read(
             } else if block[0].eq_ignore_ascii_case("input") {
                 match line.split_once('=') {
                     Some((name, value)) => out.push(Directive::Input {
-                        name: if block.len() == 2 && block[1].eq_ignore_ascii_case("touchpad") {
-                            format!("touchpad:{}", name.trim().to_ascii_lowercase())
+                        name: if block.len() == 2
+                            && INPUT_DEVICE_CLASSES.iter().any(|class| block[1].eq_ignore_ascii_case(class))
+                        {
+                            format!("{}:{}", block[1].to_ascii_lowercase(), name.trim().to_ascii_lowercase())
                         } else {
                             name.trim().to_ascii_lowercase()
                         },

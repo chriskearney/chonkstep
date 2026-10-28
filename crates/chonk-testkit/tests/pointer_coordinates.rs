@@ -251,22 +251,24 @@ fn touch_at_scale(scale: f32, subsurface: bool) {
     let scale = f64::from(scale);
     let offset = if subsurface { (40.0 * scale, 30.0 * scale) } else { (0.0, 0.0) };
     let origin = (f64::from(window.x - window.offset_x) + offset.0, f64::from(window.y - window.offset_y) + offset.1);
-    let global = |x, y| (origin.0 + x * scale, origin.1 + y * scale);
-    let (x, y) = global(80.0, 70.0);
-    session.door().touch_down(0, x, y).unwrap();
+    // The touchscreen covers the session's one output, the whole layout.
+    let world = session.world().unwrap();
+    let digitiser = |x, y| world.touch_fraction(origin.0 + x * scale, origin.1 + y * scale);
+    let (u, v) = digitiser(80.0, 70.0);
+    session.door().touch_down(0, u, v).unwrap();
     session.door().touch_frame().unwrap();
     let mut last = wait_event(&session, 0, "touch-down-0");
     assert!((last.x - 80.0).abs() < 0.01 && (last.y - 70.0).abs() < 0.01, "touch down: {last:?}");
 
-    let (x, y) = global(100.0, 90.0);
-    session.door().touch_down(1, x, y).unwrap();
+    let (u, v) = digitiser(100.0, 90.0);
+    session.door().touch_down(1, u, v).unwrap();
     session.door().touch_frame().unwrap();
     last = wait_event(&session, last.sequence, "touch-down-1");
     assert!((last.x - 100.0).abs() < 0.01 && (last.y - 90.0).abs() < 0.01, "second touch: {last:?}");
 
     for (slot, x, y) in [(0, 120.0, 90.0), (1, 170.0, 100.0), (0, 420.0, 90.0), (1, 15.0, -10.0)] {
-        let (gx, gy) = global(x, y);
-        session.door().touch_motion(slot, gx, gy).unwrap();
+        let (u, v) = digitiser(x, y);
+        session.door().touch_motion(slot, u, v).unwrap();
         session.door().touch_frame().unwrap();
         last = wait_event(&session, last.sequence, &format!("touch-motion-{slot}"));
         assert!(
@@ -279,8 +281,8 @@ fn touch_at_scale(scale: f32, subsurface: bool) {
     session.door().touch_up(0).unwrap();
     session.door().touch_frame().unwrap();
     last = wait_event(&session, last.sequence, "touch-up-0");
-    let (x, y) = global(35.0, 45.0);
-    session.door().touch_motion(1, x, y).unwrap();
+    let (u, v) = digitiser(35.0, 45.0);
+    session.door().touch_motion(1, u, v).unwrap();
     session.door().touch_frame().unwrap();
     last = wait_event(&session, last.sequence, "touch-motion-1");
     assert!((last.x - 35.0).abs() < 0.01 && (last.y - 45.0).abs() < 0.01, "remaining touch: {last:?}");
@@ -291,11 +293,11 @@ fn touch_at_scale(scale: f32, subsurface: bool) {
     // It must not reach the previous focus (especially across session lock).
     // The client's subsequent fresh down proves ordering without a sleep-based
     // negative assertion; a stale motion makes the probe fail its slot check.
-    session.door().touch_motion(1, x, y).unwrap();
+    session.door().touch_motion(1, u, v).unwrap();
     session.door().touch_frame().unwrap();
 
     // Cancellation releases slot IDs and the implicit grab for a fresh sequence.
-    session.door().touch_down(0, x, y).unwrap();
+    session.door().touch_down(0, u, v).unwrap();
     session.door().touch_frame().unwrap();
     last = wait_event(&session, last.sequence, "touch-down-0");
     assert!((last.x - 35.0).abs() < 0.01 && (last.y - 45.0).abs() < 0.01, "fresh touch: {last:?}");
@@ -338,4 +340,59 @@ fn integer_scaled_subsurface_touch_coordinates_and_slots() {
 #[ignore = "needs a live Wayland session to nest inside"]
 fn fractional_scaled_subsurface_touch_coordinates_and_slots() {
     touch_at_scale(1.5, true);
+}
+
+/// A touchscreen covers one output, not the whole layout. With the nested
+/// output split in two, a touch at fractions of the digitiser lands at
+/// those fractions of the output it covers. Scaled to the union of both, as
+/// it once was, a touch on the left output landed twice as far right.
+fn touch_on_split_outputs(name: &str, hyprland_conf: Option<&str>, covered: usize) {
+    let mut options =
+        SessionOptions { scale: Some(1.0), config_extra: "show_dock = false\n".into(), ..SessionOptions::default() };
+    if let Some(conf) = hyprland_conf {
+        options.config_extra.push_str("hyprland_config = true\n");
+        options.config_root_files.push(("hypr/hyprland.conf".into(), conf.into()));
+    }
+    let mut session = Session::boot(name, options).expect("nested compositor");
+    session.door().virtual_outputs(true).unwrap();
+    // The door's split: the primary is the host's left half, and the
+    // second output takes the rest.
+    let world = session.world().unwrap();
+    let half = world.output_w / 2;
+    let (x, width) = if covered == 0 { (0, half) } else { (half, world.output_w - half) };
+    let (x, width, height) = (f64::from(x), f64::from(width), f64::from(world.output_h));
+    // A new window opens on the output under the pointer.
+    session.door().motion(x + width / 2.0, height / 2.0).unwrap();
+    let binary = profile_binary(PROBE).expect("input probe built");
+    session.launch(binary.to_str().unwrap(), &["1", "root"]).expect("probe launches");
+    let window = session.wait_for_window("input-probe").expect("probe maps");
+    session.door().barrier().unwrap();
+    let origin = (f64::from(window.x - window.offset_x), f64::from(window.y - window.offset_y));
+    let target = (origin.0 + 80.0, origin.1 + 70.0);
+    assert!((x..x + width).contains(&target.0), "the probe must open on output {covered}: {window:?}");
+
+    session.door().touch_down(0, (target.0 - x) / width, target.1 / height).unwrap();
+    session.door().touch_frame().unwrap();
+    let down = wait_event(&session, 0, "touch-down-0");
+    assert!((down.x - 80.0).abs() < 0.01 && (down.y - 70.0).abs() < 0.01, "touch on output {covered}: {down:?}");
+    session.door().touch_up(0).unwrap();
+    session.door().touch_frame().unwrap();
+    wait_event(&session, down.sequence, "touch-up-0");
+}
+
+/// No output is named and none is a built-in panel, so the primary.
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_touch_lands_on_the_primary_output_not_across_the_layout() {
+    touch_on_split_outputs("touch-split-primary", None, 0);
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_touch_lands_on_the_output_the_configuration_names() {
+    touch_on_split_outputs(
+        "touch-split-configured",
+        Some("input {\n    touchdevice {\n        output = chonkstep-right\n    }\n}\n"),
+        1,
+    );
 }

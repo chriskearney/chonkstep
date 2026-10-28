@@ -55,7 +55,7 @@
 //! `o.shell_succeeds`, which would run a shell — is not answered. The
 //! block is skipped and said so.
 
-use super::directive::{BindFlags, Directive, Dispatcher, Include, Matcher, Monitor, WindowRule};
+use super::directive::{BindFlags, Directive, Dispatcher, Include, Matcher, Monitor, WindowRule, INPUT_DEVICE_CLASSES};
 
 /// The most iterations a numeric `for` is expanded to. Omarchy's
 /// longest is ten; a file asking for a million is either broken or
@@ -1357,11 +1357,11 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
         for (key, value) in fields {
             let Some(key) = key else { continue };
             if let Value::Table(nested) = value {
-                if key == "touchpad" {
+                if INPUT_DEVICE_CLASSES.contains(&key.as_str()) {
                     for (nested_key, nested_value) in nested {
                         let Some(nested_key) = nested_key else { continue };
                         if !matches!(nested_value, Value::Table(_)) {
-                            out.push(input_setting(format!("touchpad:{nested_key}"), nested_value));
+                            out.push(input_setting(format!("{key}:{nested_key}"), nested_value));
                         }
                     }
                 } else {
