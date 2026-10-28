@@ -54,6 +54,8 @@ pub(crate) struct Frame {
     pub unclassified: usize,
     pub reasons: [usize; RenderingReason::LABELS.len()],
     pub full_damage: bool,
+    /// Armed for live adaptive sync rather than the fixed refresh grid.
+    pub variable_refresh: bool,
     pub cpu_ns: [u64; 9],
 }
 
@@ -75,6 +77,7 @@ impl Default for Frame {
             unclassified: 0,
             reasons: [0; RenderingReason::LABELS.len()],
             full_damage: false,
+            variable_refresh: false,
             cpu_ns: [0; 9],
         }
     }
