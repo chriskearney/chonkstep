@@ -214,6 +214,15 @@ impl HeadSource<'_> {
         }
     }
 
+    /// The EDID serial, empty when the EDID had none or could not be
+    /// read.
+    fn serial(&self) -> &str {
+        match self {
+            HeadSource::Live(entry) => &entry.serial,
+            HeadSource::Parked(setup) => &setup.serial,
+        }
+    }
+
     fn modes(&self) -> &[smithay::output::Mode] {
         match self {
             HeadSource::Live(entry) => &entry.modes,
@@ -487,6 +496,12 @@ fn announce_head(
     if version >= 2 {
         head.make(output.physical_properties().make);
         head.model(output.physical_properties().model);
+        // Optional in the protocol, and what tells two identical
+        // monitors apart: kanshi matches "make model serial", and
+        // without this event it reads every serial as "Unknown".
+        if !source.serial().is_empty() {
+            head.serial_number(source.serial().to_string());
+        }
     }
 
     let mut modes = Vec::with_capacity(source.modes().len());
