@@ -1417,13 +1417,7 @@ impl<B: Backend> WindowManager<B> {
                 // both, so nothing else is owed here.
                 self.focus_client(next);
             }
-            None => {
-                self.focused = None;
-                if let Some(client) = self.clients.get_mut(losing) {
-                    client.flags.remove(ClientFlags::FOCUSED);
-                }
-                self.backend.publish_active_window(None);
-            }
+            None => self.clear_focus(losing),
         }
     }
 
@@ -1886,11 +1880,7 @@ impl<B: Backend> WindowManager<B> {
         if should_hide {
             self.hide_client_surface(id);
             if self.focused == Some(id) {
-                if let Some(c) = self.clients.get_mut(id) {
-                    c.flags.remove(ClientFlags::FOCUSED);
-                }
-                self.focused = None;
-                self.backend.publish_active_window(None);
+                self.clear_focus(id);
             }
         } else if (left_special || self.separate_spaces())
             && !self.mac_client_hidden(id)
@@ -2417,6 +2407,16 @@ impl<B: Backend> WindowManager<B> {
             self.frame_index.insert(frame, id);
         }
         self.managed_order.push(window);
+        // Click-to-focus from the moment the window is managed, not
+        // only once it has held focus and lost it: a window mapped
+        // without initial focus never loses it, so it would otherwise
+        // never be grabbed. The `focus_client` at the end of this
+        // function lifts the grab again in the common case. Issued
+        // before the drag gesture's grab, which shares button 1, so
+        // the gesture's own modifier combinations stay the gesture's.
+        if !window_rule.no_focus {
+            self.backend.grab_button_passive(window, MouseButton::Left);
+        }
         // The gesture has to reach this window's own content, which on
         // X11 means a passive grab the backend installs per window.
         self.backend.set_drag_gesture_grab(window, self.drag_modifier);
@@ -2628,7 +2628,9 @@ impl<B: Backend> WindowManager<B> {
         // with three windows still on screen used to leave the keyboard
         // pointed at nothing until the user clicked something.
         if self.focused == Some(id) {
-            self.focused = None;
+            // The entry is already gone, so this clears `focused` and
+            // nothing else: there is no window left to grab or repaint.
+            self.release_focus(id);
             // A member of a shown overlay hands the keyboard to a
             // sibling first: the overlay is what the user was working
             // in, and the ordinary successor would be the window under
@@ -2958,8 +2960,9 @@ impl<B: Backend> WindowManager<B> {
         }
         self.focus_client(id);
         // A click on a client's own content only ever reaches this
-        // handler at all via the passive grab `focus_client` maintains
-        // on unfocused clients (an already-focused client isn't
+        // handler at all via the passive grab every unfocused client
+        // holds — installed at map, lifted by `focus_client`, restored
+        // by `release_focus` (an already-focused client isn't
         // grabbed, so its own clicks go straight to it without `wm-core`
         // seeing them) — so every call here came through that grab, and
         // needs replaying: without it, the click that just focused this
@@ -4805,19 +4808,8 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
 
-        if let Some(prev) = self.focused.take() {
-            let prev_window = self.clients.get_mut(prev).map(|c| {
-                c.flags.remove(ClientFlags::FOCUSED);
-                c.window
-            });
-            if let Some(window) = prev_window {
-                // Re-grab now that it's losing focus — its content
-                // needs to be click-to-focus-able again (see
-                // `handle_client_button`/`grab_button_passive`'s doc
-                // comments for the full mechanism).
-                self.backend.grab_button_passive(window, MouseButton::Left);
-            }
-            self.repaint_decoration(prev);
+        if let Some(prev) = self.focused {
+            self.release_focus(prev);
         }
 
         let Some(client) = self.clients.get_mut(id) else {
@@ -4863,6 +4855,49 @@ impl<B: Backend> WindowManager<B> {
         {
             self.reflow_client_workspace(id);
         }
+    }
+
+    /// The one place a client stops holding focus. Keeps the
+    /// `FOCUSED` bit, `focused`, the click-to-focus grab and the
+    /// chrome in agreement.
+    ///
+    /// Each site that cleared focus used to write this out by hand,
+    /// and only the one in `focus_client_with` re-installed the grab.
+    /// A window that lost focus any other way — sent to another
+    /// workspace alone, left behind on a workspace with nothing to
+    /// hand focus to — stayed ungrabbed, and on X11 a click on its
+    /// content went straight to the client without `wm-core` ever
+    /// seeing it: no focus, no raise, until the user found its
+    /// titlebar.
+    ///
+    /// Publishes nothing, so a caller about to focus a successor does
+    /// not announce "no window" in between; [`Self::clear_focus`] is
+    /// the form for one that leaves nothing focused. Safe on a client
+    /// `forget` has already removed: only `focused` is left to clear.
+    fn release_focus(&mut self, losing: ClientId) {
+        if self.focused == Some(losing) {
+            self.focused = None;
+        }
+        let Some(client) = self.clients.get_mut(losing) else {
+            return;
+        };
+        client.flags.remove(ClientFlags::FOCUSED);
+        // Re-grab now that it's losing focus — its content needs to be
+        // click-to-focus-able again (see `handle_client_button`/
+        // `grab_button_passive`'s doc comments for the full mechanism).
+        // A `NO_FOCUS` window is left alone: the click could not focus
+        // it anyway.
+        if !client.flags.contains(ClientFlags::NO_FOCUS) {
+            self.backend.grab_button_passive(client.window, MouseButton::Left);
+        }
+        self.repaint_decoration(losing);
+    }
+
+    /// [`Self::release_focus`] for a caller with no successor to hand
+    /// focus to: also publishes that no window is active.
+    fn clear_focus(&mut self, losing: ClientId) {
+        self.release_focus(losing);
+        self.backend.publish_active_window(None);
     }
 
     /// Pushes a client's current `_NET_WM_STATE`-relevant flags to the
@@ -6114,6 +6149,128 @@ mod tests {
         assert!(!wm.backend().passively_grabbed.contains(&w1), "now focused, w1 must be ungrabbed");
         assert!(wm.backend().passively_grabbed.contains(&w2), "now unfocused, w2 must become grabbed");
         assert_eq!(wm.backend().replay_pointer_calls, 1, "the triggering click must be replayed through to the client");
+    }
+
+    fn content_press(window: FakeWindowId) -> BackendEvent<FakeWindowId, FakeFrameId> {
+        BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(50, 50),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 0,
+            mods: Modifiers::empty(),
+        }
+    }
+
+    /// The focus state's two halves, checked together: `FOCUSED` marks
+    /// exactly `focused`, and a client holds the click-to-focus grab
+    /// exactly when a content click could focus it and it does not
+    /// already have focus. A client parked on another workspace or
+    /// miniaturized counts: the grab is inert until it is shown, and
+    /// has to be there when it is.
+    fn assert_focus_invariants(wm: &WindowManager<FakeBackend>, context: &str) {
+        let flagged: Vec<_> = wm
+            .clients
+            .iter()
+            .filter(|(_, client)| client.flags.contains(ClientFlags::FOCUSED))
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(flagged, wm.focused_client().into_iter().collect::<Vec<_>>(), "{context}");
+        for (id, client) in wm.clients.iter() {
+            let wants_grab = wm.focused_client() != Some(id) && !client.flags.contains(ClientFlags::NO_FOCUS);
+            assert_eq!(
+                wm.backend().passively_grabbed.contains(&client.window),
+                wants_grab,
+                "{context}: {id:?} grabbed should be {wants_grab}"
+            );
+        }
+    }
+
+    /// Sending the only window on a workspace away clears focus rather
+    /// than handing it on, and that clear used to be written out by
+    /// hand without the re-grab `focus_client_with` gives a window it
+    /// takes focus from. Two windows sent away like that and then
+    /// visited left the older one on screen, unfocused and ungrabbed:
+    /// on X11 a click on its content went straight to the client, and
+    /// only its titlebar could focus it.
+    #[test]
+    fn a_window_sent_away_alone_is_still_focused_by_a_content_click() {
+        let mut backend = FakeBackend::new();
+        let a_window = backend.create_window();
+        let b_window = backend.create_window();
+        let mut wm = wm(backend);
+
+        wm.dispatch(BackendEvent::MapRequest(a_window));
+        let a = wm.client_for_window(a_window).unwrap();
+        assert_focus_invariants(&wm, "A mapped");
+        wm.move_client_to_workspace(a, 1);
+        assert_eq!(wm.focused_client(), None, "nothing is left on workspace 0 to take focus");
+        assert_focus_invariants(&wm, "A sent away");
+
+        wm.dispatch(BackendEvent::MapRequest(b_window));
+        let b = wm.client_for_window(b_window).unwrap();
+        assert_eq!(wm.focused_client(), Some(b));
+        assert_focus_invariants(&wm, "B mapped");
+        wm.move_client_to_workspace(b, 1);
+        assert_focus_invariants(&wm, "B sent away");
+
+        wm.switch_workspace(1);
+        assert_eq!(wm.focused_client(), Some(b), "the most recently focused window takes focus");
+        assert_focus_invariants(&wm, "workspace 1 shown");
+        assert!(wm.backend().passively_grabbed.contains(&a_window), "A is on screen and unfocused");
+
+        wm.dispatch(content_press(a_window));
+        assert_eq!(wm.focused_client(), Some(a), "a click on A's content focuses it");
+        assert_focus_invariants(&wm, "A clicked");
+    }
+
+    /// A `no_initial_focus` window never passes through `focus_client`
+    /// at map, so it never lost focus either, and the grab used to be
+    /// installed only on losing it. It has to be grabbed from the
+    /// moment it is managed.
+    #[test]
+    fn a_window_mapped_without_initial_focus_is_focused_by_a_content_click() {
+        let mut backend = FakeBackend::new();
+        let first = backend.create_window();
+        let fresh = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(first));
+        wm.set_float_policy(Some(std::sync::Arc::new(NoInitialFocus)));
+        wm.dispatch(BackendEvent::MapRequest(fresh));
+        let first_id = wm.client_for_window(first).unwrap();
+        let fresh_id = wm.client_for_window(fresh).unwrap();
+        assert_eq!(wm.focused_client(), Some(first_id), "the rule leaves focus where it was");
+        assert!(wm.backend().passively_grabbed.contains(&fresh), "the fresh window is grabbed from map");
+        assert_focus_invariants(&wm, "mapped without focus");
+
+        wm.dispatch(content_press(fresh));
+        assert_eq!(wm.focused_client(), Some(fresh_id));
+        assert_focus_invariants(&wm, "clicked");
+    }
+
+    /// The other gestures that clear focus from a window with no
+    /// successor to give it to: switching away from its workspace and
+    /// miniaturizing it. Both go through `focus_successor_of`.
+    #[test]
+    fn a_window_left_without_a_successor_keeps_its_click_to_focus_grab() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(!wm.backend().passively_grabbed.contains(&window), "the focused window is not grabbed");
+
+        wm.switch_workspace(1);
+        assert_eq!(wm.focused_client(), None);
+        assert_focus_invariants(&wm, "switched away");
+
+        wm.switch_workspace(0);
+        assert_eq!(wm.focused_client(), Some(id), "coming back refocuses it");
+        assert_focus_invariants(&wm, "switched back");
+
+        wm.miniaturize(id);
+        assert_eq!(wm.focused_client(), None);
+        assert_focus_invariants(&wm, "miniaturized");
     }
 
     /// Regression test: hovering a resize corner/edge must set a

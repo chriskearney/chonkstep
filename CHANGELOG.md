@@ -5,6 +5,12 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- In the X11 session, a click inside an unfocused window always focuses
+  and raises it. A window that lost focus with nothing else to take it,
+  such as the only window sent to another workspace, or one opened under a
+  `no_initial_focus` rule, used to pass the click to the application and
+  could only be focused from its titlebar.
+
 ## [0.7.2] - 2026-10-06
 
 - At startup, watch udev for display changes before the first connector

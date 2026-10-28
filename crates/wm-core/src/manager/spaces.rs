@@ -1070,11 +1070,8 @@ impl<B: Backend> WindowManager<B> {
         if self.focused.is_none_or(|id| self.is_focusable(id)) {
             return;
         }
-        if let Some(previous) = self.focused.take() {
-            if let Some(client) = self.clients.get_mut(previous) {
-                client.flags.remove(ClientFlags::FOCUSED);
-            }
-            self.repaint_decoration(previous);
+        if let Some(previous) = self.focused {
+            self.release_focus(previous);
         }
         let next = self
             .focus_history
@@ -1153,12 +1150,8 @@ impl<B: Backend> WindowManager<B> {
             .find(|&id| self.clients[id].workspace == workspace && self.is_focusable(id));
         if let Some(next) = next {
             self.focus_client(next);
-        } else if let Some(previous) = self.focused.take() {
-            if let Some(client) = self.clients.get_mut(previous) {
-                client.flags.remove(ClientFlags::FOCUSED);
-            }
-            self.repaint_decoration(previous);
-            self.backend.publish_active_window(None);
+        } else if let Some(previous) = self.focused {
+            self.clear_focus(previous);
         }
         self.bump_protocol_state_revision();
         self.backend
