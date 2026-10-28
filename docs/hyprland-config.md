@@ -815,6 +815,11 @@ Hyprland's stable `desc:make model serial` form (copy the `description`
 from `hyprctl monitors`); the latter follows a physical display when it
 moves to another dock port. A selector that matches nothing is named in
 the log together with the connected connectors and EDID descriptions.
+Some drivers report an external display connected before its EDID can
+be read, Apple's display driver among them at login and after a dock
+retrains its links. Such a connector is probed again for about 16
+seconds, and once its EDID arrives the output is adopted again under its
+description, so a `desc:` rule still applies to it.
 The supported transaction is:
 
 - `preferred` (or omitted), `highrr`, `highres`, `WIDTHxHEIGHT`,
