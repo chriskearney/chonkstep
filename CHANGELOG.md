@@ -5,6 +5,10 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- While adaptive sync is live on a fullscreen game or video, a frame that
+  just misses a refresh of the fixed grid is presented as soon as it is
+  ready, instead of waiting nearly a whole refresh for the next one.
+
 ## [0.7.2] - 2026-10-06
 
 - At startup, watch udev for display changes before the first connector
