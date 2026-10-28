@@ -112,6 +112,11 @@ pub enum NetState {
     /// urgency bit, which is how most X11 applications actually ask.
     DemandsAttention,
     Modal,
+    /// `_NET_WM_STATE_SHADED`: rolled up into the titlebar, exactly as
+    /// the titlebar's own shade does. Whatever `shade` refuses — a
+    /// window with no titlebar of ours, a fullscreen one — a request
+    /// is refused too.
+    Shaded,
 }
 
 /// The complete `_NET_WM_STATE`-relevant truth published for one
@@ -410,8 +415,9 @@ pub enum BackendEvent<Win, Frame> {
     DesktopSwitchRequested(usize),
     /// An EWMH `_NET_WM_DESKTOP` client message: move this window to
     /// that workspace. The spec's 0xFFFFFFFF "all desktops" value is
-    /// not delivered (this WM has no sticky windows yet); backends
-    /// swallow it.
+    /// never delivered here: a backend sends it as a `NetStateRequested`
+    /// for [`NetState::Pinned`], which is what "on every desktop" means
+    /// on this one (`ewmh::ALL_DESKTOPS`).
     WindowDesktopRequested { window: Win, desktop: usize },
     /// The backend's connection to the display server is gone for good.
     /// The event loop must exit: continuing to poll a dead connection

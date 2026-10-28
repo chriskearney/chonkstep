@@ -6,6 +6,7 @@ use wm_core::{
     NetStateAction, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
     MAX_WORKSPACES,
 };
+use wm_core::ewmh::{net_state_action, workspace_index_from_ewmh, ALL_DESKTOPS, REQUESTABLE_NET_WM_STATES};
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
 use x11rb::connection::{Connection, RequestConnection};
@@ -173,6 +174,12 @@ pub struct X11Backend {
     /// all, would spin at 100% CPU forever — two zombie WMs after a
     /// display restart, confirmed live).
     shutdown_emitted: bool,
+    /// Core events owed after the one `translate_event` returned, handed
+    /// out by `poll_event` ahead of the connection. Holds the urgency of
+    /// a window whose `WM_HINTS` was already urgent when it became
+    /// known: it has to land after that window's `MapRequest`, so the
+    /// client exists in the core by the time it does.
+    deferred_events: VecDeque<BackendEvent<XWindow, XFrame>>,
 
     known_clients: HashSet<Window>,
     /// Frame XID -> client XID, populated by `create_decoration`.
@@ -520,6 +527,7 @@ impl X11Backend {
             motif_wm_hints,
             ewmh,
             shutdown_emitted: false,
+            deferred_events: VecDeque::new(),
             known_clients: HashSet::new(),
             frame_to_client: HashMap::new(),
             frame_shapes: HashMap::new(),
@@ -1221,6 +1229,7 @@ impl X11Backend {
                 // selected for its property changes".
                 self.watch_client_properties(e.window);
                 self.refresh_strut(e.window, true);
+                self.defer_map_time_urgency(e.window);
                 Some(BackendEvent::MapRequest(XWindow(e.window)))
             }
             Event::UnmapNotify(e) => {
@@ -1329,6 +1338,16 @@ impl X11Backend {
                 }
                 if e.atom == u32::from(AtomEnum::WM_TRANSIENT_FOR) {
                     return Some(BackendEvent::ParentChanged(XWindow(e.window)));
+                }
+                // ICCCM `WM_HINTS`, whose urgency bit is how most X11
+                // applications actually ask for attention — chat
+                // clients, terminal bells, mail notifiers. Both
+                // directions, as under XWayland: a client clears the
+                // bit once it has been seen, and that `Remove` is how
+                // the flag goes away when the application decides the
+                // moment has passed.
+                if e.atom == u32::from(AtomEnum::WM_HINTS) {
+                    return Some(urgency_request(XWindow(e.window), self.window_is_urgent(e.window)));
                 }
                 if e.atom == self.ewmh.net_wm_state {
                     return Some(BackendEvent::ModalChanged {
@@ -1448,68 +1467,90 @@ impl X11Backend {
             return Some(BackendEvent::DesktopSwitchRequested(desktop));
         }
         if e.type_ == self.ewmh.net_wm_desktop {
-            // EWMH "_NET_WM_DESKTOP": data.l[0] is the desktop a pager
-            // wants `e.window` moved to. The spec's special 0xFFFFFFFF
-            // value means "on all desktops" — this WM has no sticky
-            // windows, so that request is swallowed rather than
-            // misread as a move to a (nonsensical) huge desktop index.
-            let desktop = e.data.as_data32()[0];
-            if desktop == 0xFFFF_FFFF {
-                return None;
-            }
-            let Some(desktop) = workspace_index_from_ewmh(desktop) else {
-                tracing::warn!(desktop, maximum = MAX_WORKSPACES - 1, "ignoring out-of-range _NET_WM_DESKTOP request");
-                return None;
-            };
-            return Some(BackendEvent::WindowDesktopRequested { window: XWindow(e.window), desktop });
+            return window_desktop_request(XWindow(e.window), e.data.as_data32()[0]);
         }
         if e.type_ == self.ewmh.net_wm_state {
-            // EWMH "_NET_WM_STATE" client message layout:
-            // data.l[0] = action (0 remove / 1 add / 2 toggle),
-            // data.l[1] and data.l[2] = up to two property atoms — two
-            // because a plain "maximize" toggles horizontal and
-            // vertical in one message.
-            let data = e.data.as_data32();
-            let action = match data[0] {
-                0 => NetStateAction::Remove,
-                1 => NetStateAction::Add,
-                2 => NetStateAction::Toggle,
-                // Not a defined action — a malformed message, not one
-                // to guess at.
-                _ => return None,
-            };
-            let to_net_state = |atom: u32| {
-                if atom == self.ewmh.net_wm_state_fullscreen {
-                    Some(NetState::Fullscreen)
-                } else if atom == self.ewmh.net_wm_state_maximized_horz {
-                    Some(NetState::MaximizedHorz)
-                } else if atom == self.ewmh.net_wm_state_maximized_vert {
-                    Some(NetState::MaximizedVert)
-                } else if atom == self.ewmh.net_wm_state_modal {
-                    Some(NetState::Modal)
-                } else {
-                    // Unrecognized property atoms are skipped, not
-                    // rejected — EWMH wants the rest of the message
-                    // still honored (see `NetState`'s doc comment).
-                    None
-                }
-            };
-            let mut recognized = [data[1], data[2]].into_iter().filter_map(to_net_state);
-            // If neither property is one this WM acts on, there's
-            // nothing to request — swallow the whole message.
-            let first = recognized.next()?;
-            let second = recognized.next();
+            let (action, first, second) = decode_net_wm_state(&self.ewmh.net_wm_states, e.data.as_data32())?;
             return Some(BackendEvent::NetStateRequested { window: XWindow(e.window), action, first, second });
         }
         None
     }
+
+    /// Whether `window`'s ICCCM `WM_HINTS` carries the urgency bit.
+    /// Read with x11rb's parser, the one smithay's `X11Surface::hints`
+    /// uses, so both sessions agree about a malformed property. Any
+    /// failure — no property, or a window destroyed between the event
+    /// and this read — is "not urgent", the same conservative reading
+    /// the `_MOTIF_WM_HINTS` path takes.
+    fn window_is_urgent(&self, window: Window) -> bool {
+        x11rb::properties::WmHints::get(&self.conn, window)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .flatten()
+            .is_some_and(|hints| hints.urgent)
+    }
+
+    /// `WM_HINTS` read once as a window becomes known as well as on
+    /// change: a client that sets urgency before its first map — the
+    /// common case, since the property is normally written alongside
+    /// the rest of its ICCCM setup — produces no `PropertyNotify` for
+    /// `translate_event` to catch. Deferred, not returned, so it lands
+    /// after the `MapRequest`.
+    fn defer_map_time_urgency(&mut self, window: Window) {
+        if self.window_is_urgent(window) {
+            self.deferred_events.push_back(urgency_request(XWindow(window), true));
+        }
+    }
 }
 
-/// Converts the untrusted CARDINAL carried by an EWMH desktop request
-/// only when it names a workspace the core permits.
-fn workspace_index_from_ewmh(desktop: u32) -> Option<usize> {
-    let desktop = usize::try_from(desktop).ok()?;
-    (desktop < MAX_WORKSPACES).then_some(desktop)
+/// The core request a client's `WM_HINTS` urgency bit makes: the ICCCM
+/// half of the attention story, landing on the same state as EWMH's
+/// `_NET_WM_STATE_DEMANDS_ATTENTION` through the same event.
+fn urgency_request(window: XWindow, urgent: bool) -> BackendEvent<XWindow, XFrame> {
+    BackendEvent::NetStateRequested {
+        window,
+        action: if urgent { NetStateAction::Add } else { NetStateAction::Remove },
+        first: NetState::DemandsAttention,
+        second: None,
+    }
+}
+
+/// EWMH "_NET_WM_DESKTOP": `desktop` is the `data.l[0]` of a pager
+/// asking for `window` to move there. The spec's [`ALL_DESKTOPS`]
+/// means "on every desktop", which on this desktop is pinned — so it
+/// becomes the same request `_NET_WM_STATE_STICKY` makes, and passes
+/// the same window rules, rather than being misread as a move to a
+/// huge desktop index.
+fn window_desktop_request(window: XWindow, desktop: u32) -> Option<BackendEvent<XWindow, XFrame>> {
+    if desktop == ALL_DESKTOPS {
+        return Some(BackendEvent::NetStateRequested { window, action: NetStateAction::Add, first: NetState::Pinned, second: None });
+    }
+    let Some(desktop) = workspace_index_from_ewmh(desktop) else {
+        tracing::warn!(desktop, maximum = MAX_WORKSPACES - 1, "ignoring out-of-range _NET_WM_DESKTOP request");
+        return None;
+    };
+    Some(BackendEvent::WindowDesktopRequested { window, desktop })
+}
+
+/// Decodes an EWMH "_NET_WM_STATE" client message against `table`,
+/// the interned [`REQUESTABLE_NET_WM_STATES`]: `data[0]` is the action
+/// (0 remove / 1 add / 2 toggle), `data[1]` and `data[2]` up to two
+/// property atoms — two because a plain "maximize" toggles horizontal
+/// and vertical in one message.
+///
+/// `None` for an undefined action (a malformed message, not one to
+/// guess at) or when neither atom is one this WM acts on. An
+/// unrecognized atom beside a recognized one is skipped, not rejected —
+/// EWMH wants the rest of the message still honored. A second atom
+/// naming the first one's state is dropped: ABOVE and STICKY are both
+/// `Pinned`, and `wmctrl -b toggle,above,sticky` must toggle the pin
+/// once, not twice back to where it started.
+fn decode_net_wm_state(table: &[(Atom, NetState)], data: [u32; 5]) -> Option<(NetStateAction, NetState, Option<NetState>)> {
+    let action = net_state_action(data[0])?;
+    let lookup = |atom: Atom| table.iter().find(|&&(candidate, _)| candidate == atom).map(|&(_, state)| state);
+    let mut recognized = [data[1], data[2]].into_iter().filter_map(lookup);
+    let first = recognized.next()?;
+    Some((action, first, recognized.next().filter(|&second| second != first)))
 }
 
 /// The EWMH atoms this backend implements, interned in one place at
@@ -1534,6 +1575,12 @@ struct EwmhAtoms {
     net_wm_state_modal: Atom,
     net_wm_state_shaded: Atom,
     net_wm_state_hidden: Atom,
+    /// [`REQUESTABLE_NET_WM_STATES`], interned: the one table both the
+    /// request decode (`decode_net_wm_state`) and `supported()` read, so
+    /// a state cannot be advertised without a request path. The named
+    /// `net_wm_state_*` fields above stay for the publish direction,
+    /// which writes particular atoms.
+    net_wm_states: Vec<(Atom, NetState)>,
     net_wm_window_type: Atom,
     net_wm_window_type_normal: Atom,
     net_wm_window_type_dialog: Atom,
@@ -1592,6 +1639,10 @@ impl EwmhAtoms {
                 .intern_atom(false, b"_NET_WM_STATE_HIDDEN")?
                 .reply()?
                 .atom,
+            net_wm_states: REQUESTABLE_NET_WM_STATES
+                .iter()
+                .map(|&(name, state)| Ok((conn.intern_atom(false, name.as_bytes())?.reply()?.atom, state)))
+                .collect::<Result<_, X11BackendError>>()?,
             net_wm_window_type: conn
                 .intern_atom(false, b"_NET_WM_WINDOW_TYPE")?
                 .reply()?
@@ -1669,8 +1720,18 @@ impl EwmhAtoms {
     /// The `_NET_SUPPORTED` payload: every EWMH atom this WM actually
     /// implements (all of the above, plus `_NET_WM_NAME`, which is
     /// interned elsewhere — see `X11Backend::net_wm_name`).
+    ///
+    /// The `_NET_WM_STATE_*` atoms come from `net_wm_states`, the table
+    /// requests are decoded against, plus HIDDEN, which EWMH reserves
+    /// to the window manager: this one publishes it for a miniaturized
+    /// window and, as the spec asks, accepts no request for it.
+    /// ABOVE, STICKY and DEMANDS_ATTENTION are honoured in the request
+    /// direction only — `publish_net_state` writes what
+    /// `NetStateSnapshot` carries, which does not include pinned or
+    /// urgent — the same terms `wm-wayland`'s `xewmh.rs` advertises
+    /// them on.
     fn supported(&self, net_wm_name: Atom) -> Vec<Atom> {
-        vec![
+        let mut supported = vec![
             self.net_wm_strut,
             self.net_wm_strut_partial,
             self.net_supported,
@@ -1684,12 +1745,6 @@ impl EwmhAtoms {
             // with raw ConfigureRequests, or to not moving at all.
             self.net_wm_moveresize,
             self.net_wm_state,
-            self.net_wm_state_fullscreen,
-            self.net_wm_state_maximized_horz,
-            self.net_wm_state_maximized_vert,
-            self.net_wm_state_modal,
-            self.net_wm_state_shaded,
-            self.net_wm_state_hidden,
             self.net_wm_window_type,
             self.net_wm_window_type_normal,
             self.net_wm_window_type_dialog,
@@ -1711,7 +1766,10 @@ impl EwmhAtoms {
             self.net_workarea,
             self.net_frame_extents,
             net_wm_name,
-        ]
+        ];
+        supported.extend(self.net_wm_states.iter().map(|&(atom, _)| atom));
+        supported.push(self.net_wm_state_hidden);
+        supported
     }
 }
 
@@ -2417,6 +2475,7 @@ impl Backend for X11Backend {
                 // only chance to be put under property watch.
                 self.watch_client_properties(win);
                 self.refresh_strut(win, true);
+                self.defer_map_time_urgency(win);
                 result.push(XWindow(win));
             }
         }
@@ -2443,6 +2502,9 @@ impl Backend for X11Backend {
     }
 
     fn poll_event(&mut self) -> Option<BackendEvent<Self::WindowId, Self::FrameId>> {
+        if let Some(event) = self.deferred_events.pop_front() {
+            return Some(event);
+        }
         loop {
             let event = match self.conn.poll_for_event() {
                 Ok(Some(e)) => e,
@@ -3508,8 +3570,9 @@ impl wm_theme_api::PopupHost for X11Backend {
 /// construction; what is testable is the pure translation this backend
 /// does on top of it — the ordering and primary-flag contract
 /// `wm-core` indexes its per-monitor workareas by
-/// (`normalize_monitors`), and the wheel-button mapping the shell's
-/// scroll channel is defined by (`wheel_scroll`).
+/// (`normalize_monitors`), the wheel-button mapping the shell's
+/// scroll channel is defined by (`wheel_scroll`), and the core requests
+/// an EWMH client message decodes to (`decode_net_wm_state`).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3612,12 +3675,112 @@ mod tests {
         }
     }
 
+    /// `REQUESTABLE_NET_WM_STATES` as `EwmhAtoms::intern` builds it,
+    /// with made-up atom ids in place of the server's.
+    fn state_table() -> Vec<(Atom, NetState)> {
+        (1..).zip(REQUESTABLE_NET_WM_STATES.iter().map(|&(_, state)| state)).collect()
+    }
+
+    fn state_atom(name: &str) -> Atom {
+        let index = REQUESTABLE_NET_WM_STATES.iter().position(|&(candidate, _)| candidate == name).unwrap();
+        state_table()[index].0
+    }
+
+    fn decode(action: u32, first: &str, second: &str) -> Option<(NetStateAction, NetState, Option<NetState>)> {
+        let atom = |name: &str| if name.is_empty() { 0 } else { state_atom(name) };
+        decode_net_wm_state(&state_table(), [action, atom(first), atom(second), 0, 0])
+    }
+
+    /// `supported()` advertises exactly this table's states (plus
+    /// HIDDEN, which no client may request), so every one of them has
+    /// to decode — the drift that left SHADED advertised and ignored.
     #[test]
-    fn ewmh_workspace_indices_stop_at_the_core_ceiling() {
-        assert_eq!(workspace_index_from_ewmh(0), Some(0));
-        assert_eq!(workspace_index_from_ewmh((MAX_WORKSPACES - 1) as u32), Some(MAX_WORKSPACES - 1));
-        assert_eq!(workspace_index_from_ewmh(MAX_WORKSPACES as u32), None);
-        assert_eq!(workspace_index_from_ewmh(u32::MAX), None);
+    fn every_advertised_state_has_a_request_path() {
+        for &(name, state) in REQUESTABLE_NET_WM_STATES {
+            assert_eq!(decode(1, name, ""), Some((NetStateAction::Add, state, None)), "{name} is advertised but not decoded");
+        }
+    }
+
+    #[test]
+    fn above_and_sticky_both_ask_for_the_one_pin() {
+        assert_eq!(decode(1, "_NET_WM_STATE_ABOVE", ""), Some((NetStateAction::Add, NetState::Pinned, None)));
+        assert_eq!(decode(0, "_NET_WM_STATE_STICKY", ""), Some((NetStateAction::Remove, NetState::Pinned, None)));
+    }
+
+    /// Two atoms for one state must not toggle it twice, back to where
+    /// it started.
+    #[test]
+    fn above_with_sticky_toggles_the_pin_once() {
+        assert_eq!(
+            decode(2, "_NET_WM_STATE_ABOVE", "_NET_WM_STATE_STICKY"),
+            Some((NetStateAction::Toggle, NetState::Pinned, None))
+        );
+    }
+
+    #[test]
+    fn demands_attention_and_shaded_reach_their_core_states() {
+        assert_eq!(
+            decode(1, "_NET_WM_STATE_DEMANDS_ATTENTION", ""),
+            Some((NetStateAction::Add, NetState::DemandsAttention, None))
+        );
+        assert_eq!(decode(2, "_NET_WM_STATE_SHADED", ""), Some((NetStateAction::Toggle, NetState::Shaded, None)));
+    }
+
+    /// The maximize pair is two different states and stays two: the
+    /// core applies them as one direction set.
+    #[test]
+    fn the_maximize_pair_still_arrives_together() {
+        assert_eq!(
+            decode(1, "_NET_WM_STATE_MAXIMIZED_HORZ", "_NET_WM_STATE_MAXIMIZED_VERT"),
+            Some((NetStateAction::Add, NetState::MaximizedHorz, Some(NetState::MaximizedVert)))
+        );
+    }
+
+    #[test]
+    fn an_undefined_action_is_refused() {
+        assert_eq!(decode(3, "_NET_WM_STATE_ABOVE", ""), None);
+        assert_eq!(decode(u32::MAX, "_NET_WM_STATE_SHADED", ""), None);
+    }
+
+    /// EWMH wants an unknown property skipped, not the message
+    /// rejected; a message naming nothing this WM models asks for
+    /// nothing.
+    #[test]
+    fn unknown_atoms_are_skipped_not_fatal() {
+        let table = state_table();
+        let shaded = state_atom("_NET_WM_STATE_SHADED");
+        assert_eq!(decode_net_wm_state(&table, [1, 9999, shaded, 0, 0]), Some((NetStateAction::Add, NetState::Shaded, None)));
+        assert_eq!(decode_net_wm_state(&table, [1, 9999, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn all_desktops_asks_for_the_pin_and_other_desktops_move_the_window() {
+        let window = XWindow(7);
+        assert!(matches!(
+            window_desktop_request(window, ALL_DESKTOPS),
+            Some(BackendEvent::NetStateRequested { action: NetStateAction::Add, first: NetState::Pinned, second: None, .. })
+        ));
+        assert!(matches!(
+            window_desktop_request(window, 2),
+            Some(BackendEvent::WindowDesktopRequested { desktop: 2, .. })
+        ));
+        assert!(window_desktop_request(window, MAX_WORKSPACES as u32).is_none(), "an out-of-range desktop is refused");
+    }
+
+    /// Clearing the bit is a request too: it is how the flag goes away
+    /// when the application, rather than the user, decides it has
+    /// been seen.
+    #[test]
+    fn the_urgency_bit_asks_for_attention_in_both_directions() {
+        let window = XWindow(7);
+        assert!(matches!(
+            urgency_request(window, true),
+            BackendEvent::NetStateRequested { action: NetStateAction::Add, first: NetState::DemandsAttention, second: None, .. }
+        ));
+        assert!(matches!(
+            urgency_request(window, false),
+            BackendEvent::NetStateRequested { action: NetStateAction::Remove, first: NetState::DemandsAttention, second: None, .. }
+        ));
     }
 
     /// The sign convention, spelled out against the physical gesture,

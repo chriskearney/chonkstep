@@ -8,6 +8,7 @@
 
 mod backend;
 mod client;
+pub mod ewmh;
 mod focus;
 mod gestures;
 mod hittest;

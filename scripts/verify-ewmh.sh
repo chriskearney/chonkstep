@@ -41,7 +41,11 @@ prop_present() {
 
 # --- _NET_SUPPORTED: the protocols we advertise to clients ------------
 supported=$(root_prop _NET_SUPPORTED)
-for atom in _NET_ACTIVE_WINDOW _NET_WM_STATE_FULLSCREEN; do
+# ABOVE, STICKY and DEMANDS_ATTENTION are honoured as requests on both
+# sessions but never written back into a window's _NET_WM_STATE, so
+# advertising them is the part of that surface xprop can see.
+for atom in _NET_ACTIVE_WINDOW _NET_WM_STATE_FULLSCREEN _NET_WM_STATE_ABOVE \
+    _NET_WM_STATE_STICKY _NET_WM_STATE_DEMANDS_ATTENTION; do
     if printf '%s' "$supported" | grep -q "$atom"; then
         ok "_NET_SUPPORTED lists $atom"
     else
