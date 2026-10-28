@@ -31,6 +31,13 @@ commands and remaining gaps; Hyprland compatibility is an ongoing target.
 Installing a new binary takes effect at the next login. Restarting a Wayland
 compositor closes its clients. Configuration and theme changes reload in place.
 
+To undo a source install, run `./scripts/uninstall.sh`. It removes the login
+sessions, SDDM integration, portal files and the links in `~/.local/bin`, and
+leaves dependencies, the checkout and exported themes alone. `--dry-run` lists
+what it would remove; `--purge` also deletes `~/.config/chonkstep` and
+`~/.local/state/chonkstep`. A package install is removed with
+`omarchy remove desktop-chonkstep` instead.
+
 ## Try a theme without changing your desktop
 
 ```sh

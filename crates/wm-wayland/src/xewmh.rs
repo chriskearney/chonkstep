@@ -73,18 +73,20 @@ use x11rb::rust_connection::RustConnection;
 // both are needed, hence the alias.
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
-use wm_core::{NetState, NetStateAction, MAX_WORKSPACES};
+use wm_core::ewmh::{net_state_action, workspace_index_from_ewmh};
+use wm_core::{NetState, MAX_WORKSPACES};
 use wm_theme_api::Rect;
 
 use crate::state::{Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlWindowId};
 
 /// What this compositor's `_NET_SUPPORTED` advertises, by atom name.
 ///
-/// Kept textually identical to `wm-x11`'s `EwmhAtoms::supported()`
-/// wherever both stacks implement the hint — the two crates cannot
-/// share the list without a new shared dependency neither wants, so
-/// the pairing is by convention: change one, check the other
-/// (`crates/wm-x11/src/backend.rs`). The deliberate differences:
+/// The `_NET_WM_STATE_*` names are `wm_core::ewmh`'s
+/// `REQUESTABLE_NET_WM_STATES`, which `wm-x11` advertises whole, less
+/// what this stack cannot honour; everything else is kept textually
+/// identical to `wm-x11`'s `EwmhAtoms::supported()` wherever both
+/// stacks implement the hint (`crates/wm-x11/src/backend.rs`). How this
+/// stack treats the shared names, and where it departs:
 ///
 /// * `_NET_WM_STATE_ABOVE` and `_NET_WM_STATE_STICKY` are advertised
 ///   for the *request* direction only. This desktop has one pinned
@@ -829,6 +831,10 @@ fn drain_inbound(comp: &mut Compositor) {
                     // the message rejected.
                     continue;
                 };
+                // ABOVE and STICKY are both `Pinned`: a message naming
+                // the two toggles the pin once, as on `wm-x11`, not
+                // twice back to where it started.
+                let second = second.filter(|second| *second != first);
                 if let Some(id) = managed_x11_window(comp, message.window) {
                     requests.push(WmEvent::NetStateRequested { window: id, action, first, second });
                 }
@@ -865,21 +871,12 @@ fn managed_x11_window(comp: &Compositor, window: XWindow) -> Option<WlWindowId> 
         .map(|(&id, _)| id)
 }
 
-/// `_NET_WM_STATE`'s `data[0]`: 0 remove, 1 add, 2 toggle. Anything
-/// else is a malformed message from an untrusted client.
-fn net_state_action(action: u32) -> Option<NetStateAction> {
-    match action {
-        0 => Some(NetStateAction::Remove),
-        1 => Some(NetStateAction::Add),
-        2 => Some(NetStateAction::Toggle),
-        _ => None,
-    }
-}
-
-/// The four `_NET_WM_STATE` atoms this module decodes. The maximized
-/// pair and fullscreen are deliberately absent: smithay's XWM already
-/// decodes those from its own connection, and decoding them here too
-/// would apply every such request twice.
+/// The four `_NET_WM_STATE` atoms this module decodes, out of
+/// `wm_core::ewmh::REQUESTABLE_NET_WM_STATES`. The maximized pair and
+/// fullscreen are deliberately absent: smithay's XWM already decodes
+/// those from its own connection, and decoding them here too would
+/// apply every such request twice. Shaded is absent for the reasons
+/// [`SUPPORTED`] gives.
 fn net_state_from_atom(atoms: &WriteAtoms, atom: Atom) -> Option<NetState> {
     if atom == atoms.net_wm_state_above || atom == atoms.net_wm_state_sticky {
         Some(NetState::Pinned)
@@ -892,13 +889,6 @@ fn net_state_from_atom(atoms: &WriteAtoms, atom: Atom) -> Option<NetState> {
     }
 }
 
-/// Converts the untrusted CARDINAL carried by an XWayland pager only
-/// when it names a workspace the core permits.
-fn workspace_index_from_ewmh(desktop: u32) -> Option<usize> {
-    let desktop = usize::try_from(desktop).ok()?;
-    (desktop < MAX_WORKSPACES).then_some(desktop)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,14 +896,6 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect::new(Point { x, y }, Size { w, h })
-    }
-
-    #[test]
-    fn xwayland_workspace_indices_stop_at_the_core_ceiling() {
-        assert_eq!(workspace_index_from_ewmh(0), Some(0));
-        assert_eq!(workspace_index_from_ewmh((MAX_WORKSPACES - 1) as u32), Some(MAX_WORKSPACES - 1));
-        assert_eq!(workspace_index_from_ewmh(MAX_WORKSPACES as u32), None);
-        assert_eq!(workspace_index_from_ewmh(u32::MAX), None);
     }
 
     /// Re-asserting the same workarea must not queue another write.
@@ -1024,17 +1006,6 @@ mod tests {
         // atom (see SUPPORTED's doc) — advertising it would be a lie a
         // client acts on.
         assert!(!SUPPORTED.contains(&"_NET_WM_STATE_SHADED"));
-    }
-
-    /// `data[0]` is untrusted: a client can put anything there, and
-    /// only three values mean anything.
-    #[test]
-    fn a_net_wm_state_action_outside_the_spec_is_refused() {
-        assert!(matches!(net_state_action(0), Some(NetStateAction::Remove)));
-        assert!(matches!(net_state_action(1), Some(NetStateAction::Add)));
-        assert!(matches!(net_state_action(2), Some(NetStateAction::Toggle)));
-        assert!(net_state_action(3).is_none());
-        assert!(net_state_action(u32::MAX).is_none());
     }
 
     #[test]

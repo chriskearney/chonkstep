@@ -5,6 +5,27 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- An external display whose EDID can only be read after it is set up,
+  which Apple's display driver does at login and after a dock retrains
+  its links, is probed again for about 16 seconds and adopted again
+  under its real make, model and serial once the EDID arrives. Before,
+  it stayed `Unknown` for the whole session, so `desc:` monitor rules
+  and kanshi profiles never matched it.
+- wlr-output-management heads carry the display's serial number, so
+  kanshi and other clients can tell two identical monitors apart.
+- While adaptive sync is live on a fullscreen game or video, a frame that
+  just misses a refresh of the fixed grid is presented as soon as it is
+  ready, instead of waiting nearly a whole refresh for the next one.
+- In the X11 session, a click inside an unfocused window always focuses
+  and raises it. A window that lost focus with nothing else to take it,
+  such as the only window sent to another workspace, or one opened under a
+  `no_initial_focus` rule, used to pass the click to the application and
+  could only be focused from its titlebar.
+- On the X11 session, a window that asks to stay on top or on every
+  desktop is pinned, and one that demands attention or sets its urgency
+  hint is marked urgent, as XWayland windows already were. A
+  `_NET_WM_STATE_SHADED` request, which the session already advertised,
+  now shades the window.
 - A touchscreen covers one output instead of the whole monitor layout, so a
   tap on a laptop's own panel lands there while an external display is
   connected. The output is the one `input:touchdevice:output` names, else
