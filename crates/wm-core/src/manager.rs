@@ -3893,13 +3893,14 @@ impl<B: Backend> WindowManager<B> {
         // exactly where it was — the window's contents gone, no chrome
         // to click, and no way back that is visible on screen.
         //
-        // Fullscreen wins because a *client* can ask for it
+        // Fullscreen wins because it is the *client's* own state
         // (`xdg_toplevel.set_fullscreen`, `_NET_WM_STATE_FULLSCREEN`)
-        // while shade is purely compositor-side presentation; the
-        // reverse guard is in `fullscreen`. Between them they keep the
-        // invariant the rest of the shade code assumes: SHADED implies
-        // a visible titlebar, and SHADED and FULLSCREEN are never both
-        // set.
+        // while shade is window-manager presentation — asked for by
+        // the user or, over EWMH, a pager, never needed by the
+        // application itself; the reverse guard is in `fullscreen`.
+        // Between them they keep the invariant the rest of the shade
+        // code assumes: SHADED implies a visible titlebar, and SHADED
+        // and FULLSCREEN are never both set.
         if client.flags.contains(ClientFlags::FULLSCREEN) {
             tracing::debug!(
                 ?id,
@@ -4394,6 +4395,7 @@ impl<B: Backend> WindowManager<B> {
                 NetState::Pinned => self.apply_pin_action(id, action),
                 NetState::DemandsAttention => self.apply_attention_action(id, action),
                 NetState::Modal => self.apply_modal_action(id, action),
+                NetState::Shaded => self.apply_shade_action(id, action),
             }
         }
         if !maximize_directions.is_empty() {
@@ -4453,6 +4455,17 @@ impl<B: Backend> WindowManager<B> {
             NetStateAction::Toggle => !currently,
         };
         self.set_urgent(id, target);
+    }
+
+    /// `_NET_WM_STATE_SHADED` from a client or pager. `shade` and
+    /// `unshade` are no-ops in their target state and keep their own
+    /// refusals, so all this decides is which of the three to call.
+    fn apply_shade_action(&mut self, id: ClientId, action: NetStateAction) {
+        match action {
+            NetStateAction::Add => self.shade(id),
+            NetStateAction::Remove => self.unshade(id),
+            NetStateAction::Toggle => self.toggle_shade(id),
+        }
     }
 
     fn apply_modal_action(&mut self, id: ClientId, action: NetStateAction) {
@@ -6403,6 +6416,48 @@ mod tests {
             second: None,
         });
         assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::URGENT));
+    }
+
+    /// `_NET_WM_STATE_SHADED` drives the titlebar's own shade, so a
+    /// pager that finds the atom in `_NET_SUPPORTED` is not answered
+    /// with silence.
+    #[test]
+    fn a_client_can_ask_to_be_shaded_and_unshaded() {
+        let (mut wm, id, window) = shadeable_window();
+        let request = |action| BackendEvent::NetStateRequested { window, action, first: NetState::Shaded, second: None };
+
+        wm.dispatch(request(NetStateAction::Add));
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+        assert_eq!(wm.backend().client_mapped.get(&window), Some(&false), "shading rolls the content away");
+
+        wm.dispatch(request(NetStateAction::Toggle));
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED), "toggle is not add");
+
+        wm.dispatch(request(NetStateAction::Toggle));
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+
+        wm.dispatch(request(NetStateAction::Remove));
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+        assert_eq!(wm.backend().client_mapped.get(&window), Some(&true));
+    }
+
+    /// The request goes through `shade`, refusals included: a
+    /// fullscreen window has no titlebar to roll up into.
+    #[test]
+    fn a_shade_request_cannot_roll_up_a_fullscreen_window() {
+        let (mut wm, id, window) = shadeable_window();
+        wm.fullscreen(id);
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Add,
+            first: NetState::Shaded,
+            second: None,
+        });
+
+        let flags = wm.client(id).unwrap().flags;
+        assert!(flags.contains(ClientFlags::FULLSCREEN));
+        assert!(!flags.contains(ClientFlags::SHADED));
     }
 
     /// Before this, nothing in the tree ever called `set_urgent(_,
@@ -10019,9 +10074,9 @@ mod tests {
         // so the shaded branch never ran, and nothing re-mapped the
         // content that `shade` had unmapped.
         //
-        // Fullscreen wins because a client can ask for it and shade is
-        // ours alone, so the shade is undone rather than the fullscreen
-        // refused.
+        // Fullscreen wins because it is the client's own state and
+        // shade is presentation, so the shade is undone rather than the
+        // fullscreen refused.
         let (mut wm, id, window) = shadeable_window();
         let unshaded_geometry = wm.client(id).unwrap().geometry;
 

@@ -5,6 +5,12 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- On the X11 session, a window that asks to stay on top or on every
+  desktop is pinned, and one that demands attention or sets its urgency
+  hint is marked urgent, as XWayland windows already were. A
+  `_NET_WM_STATE_SHADED` request, which the session already advertised,
+  now shades the window.
+
 ## [0.7.2] - 2026-10-06
 
 - At startup, watch udev for display changes before the first connector
