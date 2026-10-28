@@ -1192,6 +1192,9 @@ struct FrameClock {
     last_sample: Option<Instant>,
     deadline: Option<Instant>,
     target_vblank: Option<Instant>,
+    /// The armed frame came from [`FrameClock::arm_variable`], so its
+    /// target is the earliest refresh rather than a fixed vblank.
+    variable: bool,
     last_late_presentation: Option<Instant>,
 }
 
@@ -1207,6 +1210,7 @@ impl FrameClock {
             last_sample: None,
             deadline: None,
             target_vblank: None,
+            variable: false,
             last_late_presentation: None,
         }
     }
@@ -1223,6 +1227,7 @@ impl FrameClock {
             last_sample: None,
             deadline: None,
             target_vblank: None,
+            variable: false,
             last_late_presentation: None,
         }
     }
@@ -1288,6 +1293,7 @@ impl FrameClock {
         if let Some(deadline) = self.deadline {
             return deadline;
         }
+        self.variable = false;
         let Some(period) = self.period.filter(|period| !period.is_zero()) else {
             self.deadline = Some(now);
             return now;
@@ -1320,6 +1326,46 @@ impl FrameClock {
         deadline
     }
 
+    /// [`FrameClock::arm`] for an output whose adaptive sync is live. The
+    /// panel then starts a refresh when a flip arrives, no sooner than one
+    /// mode period after the last, so there is no later vblank to miss. An
+    /// early frame still waits, as on the grid, until its budget before that
+    /// earliest refresh, which keeps input fresh and the rate within the
+    /// mode's. A later one renders at once instead of being held to the
+    /// next point of the fixed grid.
+    ///
+    /// Whether this frame scans out directly, and so whether it keeps VRR,
+    /// is decided only after rendering. The caller therefore chooses this
+    /// from the live state, the one the previous frame was queued with: a
+    /// fullscreen client keeps its plane from one frame to the next. The
+    /// frame that turns VRR on is still armed on the grid. The frame that
+    /// turns it off renders early and is queued at fixed refresh, which
+    /// only costs that frame some input freshness.
+    fn arm_variable(&mut self, now: Instant) -> Instant {
+        if let Some(deadline) = self.deadline {
+            return deadline;
+        }
+        self.variable = true;
+        let Some(period) = self.period.filter(|period| !period.is_zero()) else {
+            self.deadline = Some(now);
+            return now;
+        };
+        let Some(last) = self.last_vblank else {
+            self.deadline = Some(now);
+            return now;
+        };
+        if now.saturating_duration_since(last) > period.saturating_mul(3) {
+            self.deadline = Some(now);
+            return now;
+        }
+
+        let earliest = last + period;
+        let deadline = earliest.checked_sub(self.pessimistic_budget()).unwrap_or(now).max(now);
+        self.target_vblank = Some(earliest.max(now));
+        self.deadline = Some(deadline);
+        deadline
+    }
+
     fn observe_render(&mut self, sample: Duration, finished: Instant) {
         let elapsed = self
             .last_sample
@@ -1342,7 +1388,9 @@ impl FrameClock {
             );
         }
 
-        if self.target_vblank.is_some_and(|target| finished > target) {
+        // A variable frame's target is only the earliest refresh: finishing
+        // after it delays that refresh by the overrun, not a whole period.
+        if !self.variable && self.target_vblank.is_some_and(|target| finished > target) {
             let overrun = self.target_vblank.map(|target| finished.duration_since(target)).unwrap_or_default();
             self.margin = self.margin.saturating_add(overrun.max(Duration::from_micros(250))).min(MAX_RENDER_MARGIN);
         } else if self.last_late_presentation.is_none_or(|late| finished.saturating_duration_since(late) >= Duration::from_secs(30)) {
@@ -3868,7 +3916,14 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             continue;
         }
         let now = Instant::now();
-        if output.frame_clock.arm(now) > now {
+        // VRR for this frame is only decided after rendering; see
+        // `FrameClock::arm_variable` for why the live state stands in.
+        let deadline = if output.drm_compositor.vrr_enabled() {
+            output.frame_clock.arm_variable(now)
+        } else {
+            output.frame_clock.arm(now)
+        };
+        if deadline > now {
             stats.skips[4] = stats.skips[4].saturating_add(1);
             continue;
         }
@@ -3876,6 +3931,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         let render_started = Instant::now();
         let flags = if output.device == 0 { frame_flags() } else { FrameFlags::empty() };
         stats.begin(flags.bits());
+        stats.current.variable_refresh = output.frame_clock.variable;
 
         // Resetting every buffer age makes the internal damage tracker
         // treat the whole output as stale, forcing a full-frame submit —
@@ -5469,6 +5525,78 @@ mod tests {
         assert!(deadline > now);
         assert!(deadline < vblank + period);
         assert_eq!(clock.target_vblank, Some(vblank + period));
+    }
+
+    #[test]
+    fn variable_refresh_does_not_hold_a_frame_that_just_missed_a_grid_point() {
+        let period = Duration::from_nanos(6_944_444);
+        let vblank = Instant::now();
+        let mut fixed = FrameClock::for_period(period);
+        fixed.note_completion(Some(vblank));
+        let mut variable = fixed;
+        // Inside both budgets before the next grid point: a fixed-refresh
+        // frame cannot make it and waits for the vblank after.
+        let now = vblank + period - Duration::from_millis(1);
+        assert_eq!(fixed.arm(now), vblank + period * 2 - fixed.pessimistic_budget());
+        assert_eq!(fixed.target_vblank, Some(vblank + period * 2));
+        assert_eq!(variable.arm_variable(now), now);
+        assert_eq!(variable.target_vblank, Some(vblank + period));
+
+        // Past the earliest refresh, the panel starts one when the flip lands.
+        let mut variable = FrameClock::for_period(period);
+        variable.note_completion(Some(vblank));
+        let later = vblank + period + Duration::from_millis(4);
+        assert_eq!(variable.arm_variable(later), later);
+        assert_eq!(variable.target_vblank, Some(later));
+    }
+
+    #[test]
+    fn variable_refresh_never_targets_sooner_than_one_period_after_the_flip() {
+        let period = Duration::from_nanos(6_944_444);
+        let vblank = Instant::now();
+        let mut early = FrameClock::for_period(period);
+        early.note_completion(Some(vblank));
+        let deadline = early.arm_variable(vblank + Duration::from_micros(100));
+        assert_eq!(deadline, vblank + period - early.pessimistic_budget());
+        assert_eq!(early.target_vblank, Some(vblank + period));
+
+        let mut offset = Duration::ZERO;
+        while offset <= period * 3 {
+            let now = vblank + offset;
+            let mut fixed = FrameClock::for_period(period);
+            fixed.note_completion(Some(vblank));
+            let mut variable = fixed;
+            let deadline = variable.arm_variable(now);
+            let target = variable.target_vblank.unwrap();
+            assert!(target >= vblank + period && target >= now, "offset {offset:?}");
+            assert!(deadline >= now && deadline <= fixed.arm(now), "offset {offset:?}");
+            offset += Duration::from_micros(100);
+        }
+
+        // After an idle gap there is no cadence to respect, as with `arm`.
+        let mut idle = FrameClock::for_period(period);
+        idle.note_completion(Some(vblank));
+        let resumed = vblank + period * 4;
+        assert_eq!(idle.arm_variable(resumed), resumed);
+        assert!(idle.target_vblank.is_none());
+    }
+
+    #[test]
+    fn slow_variable_frames_do_not_raise_the_margin() {
+        let period = Duration::from_nanos(6_944_444);
+        let vblank = Instant::now();
+        let mut fixed = FrameClock::for_period(period);
+        fixed.note_completion(Some(vblank));
+        let mut variable = fixed;
+        let now = vblank + period + Duration::from_millis(2);
+        let finished = vblank + period * 2 + Duration::from_millis(1);
+        fixed.arm(now);
+        variable.arm_variable(now);
+        fixed.observe_render(finished - now, finished);
+        variable.observe_render(finished - now, finished);
+        assert!(fixed.margin > BASE_RENDER_MARGIN);
+        assert_eq!(variable.margin, BASE_RENDER_MARGIN);
+        assert_eq!((variable.mean, variable.deviation), (fixed.mean, fixed.deviation));
     }
 
     #[test]

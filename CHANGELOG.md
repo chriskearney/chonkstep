@@ -13,6 +13,9 @@ crate and both session binaries carry the same number.
   and kanshi profiles never matched it.
 - wlr-output-management heads carry the display's serial number, so
   kanshi and other clients can tell two identical monitors apart.
+- While adaptive sync is live on a fullscreen game or video, a frame that
+  just misses a refresh of the fixed grid is presented as soon as it is
+  ready, instead of waiting nearly a whole refresh for the next one.
 
 ## [0.7.2] - 2026-10-06
 
