@@ -16,6 +16,11 @@ crate and both session binaries carry the same number.
 - While adaptive sync is live on a fullscreen game or video, a frame that
   just misses a refresh of the fixed grid is presented as soon as it is
   ready, instead of waiting nearly a whole refresh for the next one.
+- In the X11 session, a click inside an unfocused window always focuses
+  and raises it. A window that lost focus with nothing else to take it,
+  such as the only window sent to another workspace, or one opened under a
+  `no_initial_focus` rule, used to pass the click to the application and
+  could only be focused from its titlebar.
 
 ## [0.7.2] - 2026-10-06
 

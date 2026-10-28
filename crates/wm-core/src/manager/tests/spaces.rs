@@ -245,6 +245,56 @@ fn losing_the_focused_display_repairs_focus_and_all_disconnected_parks_everythin
     assert!(visible(&wm, left) && visible(&wm, right));
 }
 
+/// Switching one display to an empty Space clears focus from a window
+/// that stays on screen on the other display. It has to come back with
+/// the click-to-focus grab every other unfocused window holds.
+#[test]
+fn a_window_unfocused_by_an_empty_space_switch_is_focused_by_a_content_click() {
+    let mut wm = dual_mac();
+    let _left = window_on(&mut wm, 0);
+    let right = window_on(&mut wm, 1);
+    let right_window = wm.client(right).unwrap().window;
+    wm.select_output(0);
+    let second = wm.create_workspace().unwrap();
+    wm.switch_workspace(second);
+    assert_eq!(wm.focused_client(), None);
+    assert!(visible(&wm, right));
+    assert_focus_invariants(&wm, "empty Space shown on the left");
+
+    wm.dispatch(content_press(right_window));
+    assert_eq!(wm.focused_client(), Some(right));
+    assert_focus_invariants(&wm, "right clicked");
+}
+
+/// Repairing focus after its display goes away takes it from the
+/// parked window before handing it on. The successor is focused with
+/// nothing to take focus from, so the parked window's grab has to be
+/// restored by the repair itself.
+#[test]
+fn a_window_parked_by_a_lost_display_is_focused_by_a_content_click_when_it_returns() {
+    let mut wm = dual_mac();
+    let left = window_on(&mut wm, 0);
+    let right = window_on(&mut wm, 1);
+    let right_window = wm.client(right).unwrap().window;
+    wm.backend_mut().set_monitors(vec![dual_monitors()[0].clone()]);
+    wm.reconcile_display_spaces();
+    assert_eq!(wm.focused_client(), Some(left));
+    assert_focus_invariants(&wm, "right display lost");
+
+    wm.backend_mut().set_monitors(dual_monitors());
+    wm.reconcile_display_spaces();
+    assert!(visible(&wm, right));
+    assert_eq!(wm.focused_client(), Some(left), "the returning display does not take focus");
+    wm.dispatch(content_press(right_window));
+    assert_eq!(wm.focused_client(), Some(right));
+    assert_focus_invariants(&wm, "right clicked");
+
+    wm.backend_mut().set_monitors(Vec::new());
+    wm.reconcile_display_spaces();
+    assert_eq!(wm.focused_client(), None);
+    assert_focus_invariants(&wm, "every display lost");
+}
+
 #[test]
 fn moving_a_window_carries_and_repositions_its_dialog_family() {
     let mut wm = dual_mac();

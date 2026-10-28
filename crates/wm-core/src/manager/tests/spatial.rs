@@ -164,17 +164,7 @@ fn spatial_generated_lifecycle_sequences_preserve_membership_focus_and_freeform_
                     );
                 }
             }
-            let flagged: Vec<_> = wm
-                .clients
-                .iter()
-                .filter(|(_, c)| c.flags.contains(ClientFlags::FOCUSED))
-                .map(|(id, _)| id)
-                .collect();
-            assert_eq!(
-                flagged,
-                wm.focused_client().into_iter().collect::<Vec<_>>(),
-                "seed {seed}, step {step}"
-            );
+            assert_focus_invariants(&wm, &format!("seed {seed}, step {step}"));
             if let Some(focused) = wm.focused_client() {
                 assert!(wm.is_focusable(focused), "seed {seed}, step {step}");
             }
