@@ -1127,6 +1127,20 @@ fn libreoffice_and_browser_exchange_document_text() {
 #[test]
 #[ignore = "scripts/e2e.sh --headless --host-renderer gl --test mac_mode"]
 fn delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_order() {
+    // Command-Tab with no frame barrier between Tab's edges. A door tap holds
+    // Tab until its press has rendered; a loaded runner can stretch that past
+    // the 200 ms repeat delay, and the switcher's repeated Tab then cycles
+    // back to the application it started from.
+    fn command_tab(s: &mut Session) {
+        s.door().key(CMD, true).unwrap();
+        s.door().barrier().unwrap();
+        s.door().key(15, true).unwrap();
+        s.door().key(15, false).unwrap();
+        // The switcher must own the keyboard before Command's release commits it.
+        s.door().barrier().unwrap();
+        s.door().key(CMD, false).unwrap();
+        s.door().barrier().unwrap();
+    }
     let mut s = boot("mac-copy-order");
     let output = s.dir.join("pty-bytes");
     let script = s.dir.join("terminal.py");
@@ -1183,7 +1197,7 @@ fn delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_orde
     }).unwrap();
     // A copy with no selected text publishes no replacement offer. The bounded
     // wait must expire and still deliver a later switch and ordinary typing.
-    chord(&mut s, &[CMD], 15);
+    command_tab(&mut s);
     focus(&mut s, &mut source, "source");
     source.evaluate("source.setSelectionRange(0,0);events.length=0;true").unwrap();
     chord(&mut s, &[CMD], 46);
@@ -1207,11 +1221,11 @@ fn delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_orde
     s.door().copy_order_clock("realtime").unwrap();
     // The normal wall-clock path must still schedule a no-offer timeout.
     // Its exact 250 ms boundary was checked above without a scheduling race.
-    chord(&mut s, &[CMD], 15);
+    command_tab(&mut s);
     focus(&mut s, &mut source, "source");
     source.evaluate("source.setSelectionRange(0,0);true").unwrap();
     chord(&mut s, &[CMD], 46);
-    chord(&mut s, &[CMD], 15);
+    command_tab(&mut s);
     s.door().tap_key(48).unwrap();
     poll_until(WAIT, "typing after the real-clock clipboard timeout", || {
         std::fs::read(&output).ok()?.ends_with(&[3, b'a', b'b']).then_some(())
