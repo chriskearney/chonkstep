@@ -10,7 +10,10 @@ crate and both session binaries carry the same number.
   its links, is probed again for about 16 seconds and adopted again
   under its real make, model and serial once the EDID arrives. Before,
   it stayed `Unknown` for the whole session, so `desc:` monitor rules
-  and kanshi profiles never matched it.
+  and kanshi profiles never matched it. It is adopted again once: the
+  new output keeps the identity already read, because Apple's driver
+  withdraws the EDID while the old output is torn down, and reading it
+  again re-adopted the display every couple of seconds.
 - wlr-output-management heads carry the display's serial number, so
   kanshi and other clients can tell two identical monitors apart.
 - While adaptive sync is live on a fullscreen game or video, a frame that

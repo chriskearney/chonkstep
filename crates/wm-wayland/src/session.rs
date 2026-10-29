@@ -2394,7 +2394,7 @@ fn attach_output(
     let candidates = adoption_modes(&target.info, target.mode);
     let mut first_error: Option<String> = None;
     for (attempt, mode) in candidates.iter().enumerate() {
-        let candidate = ConnectorTarget { info: target.info.clone(), crtc: target.crtc, mode: *mode };
+        let candidate = ConnectorTarget { info: target.info.clone(), crtc: target.crtc, mode: *mode, identity: target.identity.clone() };
         // A refused attempt returns before anything escapes it: the
         // surface, allocator and compositor it built are dropped (and
         // the surface's state cleared) before the next one binds the
@@ -2435,7 +2435,7 @@ fn attach_output_at(
     target: &ConnectorTarget,
     position: Point,
 ) -> Result<(SessionOutput, OutputSetup), String> {
-    let ConnectorTarget { info, crtc, mode } = target;
+    let ConnectorTarget { info, crtc, mode, identity: known } = target;
     let name = connector_name(info);
 
     // The output, in wayland terms. No `Transform::Flipped180`: that
@@ -2444,7 +2444,7 @@ fn attach_output_at(
     // `state.rs`'s `run`). A KMS scanout buffer's origin is the
     // screen's, so any transform here would visibly flip the desktop.
     let wl_mode = OutputMode::from(*mode);
-    let identity = connector_identity(drm.device_fd(), info.handle());
+    let identity = connector_identity(drm.device_fd(), info.handle()).or_else(|| known.clone());
     let (mut physical_w, mut physical_h) = info.size().unwrap_or((0, 0));
     if physical_w == 0 || physical_h == 0 {
         if let Some((edid_w, edid_h)) = identity.as_ref().and_then(|identity| identity.physical_mm) {
@@ -2884,8 +2884,21 @@ fn plan_parked<H: PartialEq + Copy>(parked: &[H], connected: &[H]) -> (Vec<H>, V
 /// Re-reads the EDID of every kept output on `device` still owed a
 /// late-EDID probe, after this rescan's forced probe gave the driver
 /// another chance to publish it. Returns the outputs whose identity has
-/// arrived, for [`merge_readoptions`]; the others spend one probe.
-fn late_edid_readoptions(session: &mut SessionGraphics, device: KmsDeviceId, plan: &RescanPlan) -> Vec<(usize, connector::Handle)> {
+/// arrived, with the identity read, for [`merge_readoptions`]; the
+/// others spend one probe.
+///
+/// The identity travels with the re-adoption instead of being read
+/// again when the new output is attached. Removing the old output
+/// stops its scanout, and Apple's DCP then withdraws the EDID until the
+/// next modeset republishes it; a second read came back empty, so the
+/// new output started probing again, found the EDID after its own
+/// modeset, and was re-adopted every couple of seconds for as long as
+/// the session ran.
+fn late_edid_readoptions(
+    session: &mut SessionGraphics,
+    device: KmsDeviceId,
+    plan: &RescanPlan,
+) -> Vec<(usize, connector::Handle, DisplayIdentity)> {
     let SessionGraphics { devices, outputs, .. } = session;
     let mut readopt = Vec::new();
     for (index, output) in outputs.iter_mut().enumerate() {
@@ -2896,12 +2909,14 @@ fn late_edid_readoptions(session: &mut SessionGraphics, device: KmsDeviceId, pla
         match late_edid_step(output.edid_probes_left, identity.is_some()) {
             None => {}
             Some(LateEdid::Readopt) => {
+                let Some(identity) = identity else { continue };
                 tracing::info!(
                     output = %output.name,
-                    description = %identity.as_ref().map(DisplayIdentity::description).unwrap_or_default(),
+                    description = %identity.description(),
                     "connector's EDID became readable after its output was set up; adopting it again under its real identity"
                 );
-                readopt.push((index, output.connector));
+                output.edid_probes_left = 0;
+                readopt.push((index, output.connector, identity));
             }
             Some(LateEdid::Retry(left)) => output.edid_probes_left = left,
             Some(LateEdid::GiveUp) => {
@@ -2968,7 +2983,8 @@ fn rescan_session_outputs(session: &mut SessionGraphics, device: KmsDeviceId) ->
     let outputs: Vec<_> = session.outputs.iter().map(|output| (output.device, output.connector)).collect();
     let mut plan = device_rescan_plan(device, &outputs, &probed, &parked_present);
     let readopt = late_edid_readoptions(session, device, &plan);
-    merge_readoptions(&mut plan, &readopt);
+    let readopted: Vec<(usize, connector::Handle)> = readopt.iter().map(|(index, handle, _)| (*index, *handle)).collect();
+    merge_readoptions(&mut plan, &readopted);
     session.devices[device].non_desktop = plan.reserved;
     let removed = plan.remove;
     for index in &removed {
@@ -2976,7 +2992,7 @@ fn rescan_session_outputs(session: &mut SessionGraphics, device: KmsDeviceId) ->
         if let Some(mut feedback) = output.presentation.take() {
             feedback.discarded();
         }
-        if readopt.iter().any(|(readopted, _)| readopted == index) {
+        if readopted.iter().any(|(readopted, _)| readopted == index) {
             tracing::info!(output = %output.name, "output removed from scanout to be adopted again with its EDID");
         } else {
             tracing::info!(output = %output.name, "connector unplugged; output removed from scanout");
@@ -3034,7 +3050,8 @@ fn rescan_session_outputs(session: &mut SessionGraphics, device: KmsDeviceId) ->
             tracing::warn!(output = %connector_name(&info), "hot-plugged connector has no free crtc");
             continue;
         };
-        let target = ConnectorTarget { info, crtc, mode };
+        let identity = readopt.iter().find(|readopted| readopted.1 == info.handle()).map(|readopted| readopted.2.clone());
+        let target = ConnectorTarget { info, crtc, mode, identity };
         let position = Point::new(next_x, 0);
         let kms = &mut session.devices[device];
         match attach_output(
@@ -3184,7 +3201,7 @@ pub(crate) fn unpark_output(graphics: &mut Graphics, name: &str) -> Result<Optio
     let Some(crtc) = crtc_for(&session.devices[device].drm, &resources, &info, &taken) else {
         return Err(format!("{name} has no free crtc to come back on"));
     };
-    let target = ConnectorTarget { info, crtc, mode };
+    let target = ConnectorTarget { info, crtc, mode, identity: None };
     let next_x = session
         .outputs
         .iter()
@@ -4317,6 +4334,11 @@ struct ConnectorTarget {
     info: connector::Info,
     crtc: crtc::Handle,
     mode: DrmMode,
+    /// An identity already read from this connector's EDID, for a
+    /// late-EDID re-adoption: Apple's DCP can drop the blob again while
+    /// the old output is torn down, so the new output must not depend
+    /// on reading it a second time (see [`late_edid_readoptions`]).
+    identity: Option<DisplayIdentity>,
 }
 
 /// Walks the candidate DRM nodes in preference order and returns the
@@ -4679,7 +4701,7 @@ fn pick_outputs(drm: &DrmDevice) -> Result<(Vec<ConnectorTarget>, Vec<connector:
             skipped.push(format!("{name} has no free crtc able to drive it"));
             continue;
         };
-        targets.push(ConnectorTarget { info, crtc, mode });
+        targets.push(ConnectorTarget { info, crtc, mode, identity: None });
     }
 
     if !targets.is_empty() {
