@@ -28,7 +28,22 @@ pub(crate) fn layout(theme: &Theme, request: &DecorationRequest) -> DecorationLa
     let size = u32::from(m.button_size).min(title.saturating_sub(border * 2));
     let mut right = w.saturating_sub(margin + border + u32::from(m.padding));
     let left = margin + border + u32::from(m.padding);
-    for button in theme.titlebar.buttons.iter().rev() {
+    let from_left = Chrome::from_theme(theme).window.left;
+    if from_left {
+        // close, minimise, zoom from the left edge in the theme's order (a Mac's)
+        let mut x = left;
+        for button in theme.titlebar.buttons.iter() {
+            if size == 0 || x.saturating_add(size) > right {
+                break;
+            }
+            if button.kind == ButtonKind::Maximize && !request.resizable {
+                continue;
+            }
+            buttons.push((button.kind, Rect::new(Point::new(x as i32, (margin + (title - size) / 2) as i32), Size::new(size, size))));
+            x += size + u32::from(m.button_gap);
+        }
+    }
+    for button in theme.titlebar.buttons.iter().rev().filter(|_| !from_left) {
         if size == 0 || right < left.saturating_add(size) {
             break;
         }
@@ -147,7 +162,7 @@ pub(crate) fn render_edges(theme: &Theme, request: &DecorationRequest, layout: &
             });
         }
     }
-    let (shadow, shape) = frame_effects(&chrome, visual, rgb);
+    let (shadow, shape) = frame_effects(&chrome, visual, rgb, request.focused);
     DecorationSurface {
         frame_size: layout.frame_size,
         parts: Vec::new(),
@@ -276,7 +291,7 @@ pub(crate) fn render(
             });
         }
     }
-    let (shadow, shape) = frame_effects(&chrome, visual, rgb);
+    let (shadow, shape) = frame_effects(&chrome, visual, rgb, request.focused);
     DecorationSurface {
         frame_size: layout.frame_size,
         parts,
@@ -292,8 +307,14 @@ fn frame_effects(
     chrome: &Chrome,
     visual: Rect,
     rgb: [u8; 3],
+    focused: bool,
 ) -> (Option<wm_theme_api::DecorationShadow>, Option<wm_theme_api::DecorationShape>) {
-    let shadow = &chrome.shadow;
+    let mut shadow = chrome.shadow;
+    if !focused && chrome.window.shadow_unfocused > 0 {
+        // a window without focus lies lower
+        shadow.color.a = chrome.window.shadow_unfocused;
+    }
+    let shadow = &shadow;
     let shadow = (shadow.color.a > 0).then_some(
         wm_theme_api::DecorationShadow {
             rect: visual,
@@ -454,10 +475,17 @@ fn title(
     w: u32,
     h: u32,
 ) -> DecorationBuffer {
+    let chrome = Chrome::from_theme(theme);
+    if chrome.window.controls != crate::modern::Controls::Glyphs {
+        // themes with shaped controls: the Forest band
+        return match super::forest::title(theme, fonts, cache, request, layout, w, h) {
+            Some(image) => DecorationBuffer { width: image.width(), height: image.height(), pixels: image.take() },
+            None => solid(1, 1, theme.terminal.bg),
+        };
+    }
     let Some(mut image) = Pixmap::new(w.max(1), h.max(1)) else {
         return solid(1, 1, theme.terminal.bg);
     };
-    let chrome = Chrome::from_theme(theme);
     let border = u32::from(chrome.frame.border.max(1));
     let line = if request.focused {
         theme.border.color_active
@@ -615,7 +643,7 @@ mod tests {
     #[test]
     fn compressed_title_reconstructs_every_original_pixel_including_corner_alpha() {
         let fonts = crate::FontState::new();
-        for (name, _) in crate::modern::CHOICES {
+        for (name, _) in crate::modern::CHOICES.into_iter().chain(crate::forest::CHOICES) {
             for appearance in [crate::Appearance::Light, crate::Appearance::Dark] {
                 for scale in [1.0, 1.5, 2.0] {
                     let theme = crate::modern::theme(name, appearance)

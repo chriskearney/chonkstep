@@ -268,6 +268,8 @@ pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, te
     let weight = match font.weight {
         FontWeight::Bold => Weight::BOLD,
         FontWeight::Normal => Weight::NORMAL,
+        FontWeight::Medium => Weight::MEDIUM,
+        FontWeight::SemiBold => Weight::SEMIBOLD,
     };
     let style = match font.style {
         FontStyle::Italic => Style::Italic,
@@ -457,6 +459,8 @@ fn draw_text_impl<const TRANSPARENT: bool>(
     let weight = match font.weight {
         FontWeight::Bold => Weight::BOLD,
         FontWeight::Normal => Weight::NORMAL,
+        FontWeight::Medium => Weight::MEDIUM,
+        FontWeight::SemiBold => Weight::SEMIBOLD,
     };
     let style = match font.style {
         FontStyle::Italic => Style::Italic,
@@ -533,6 +537,87 @@ fn draw_text_impl<const TRANSPARENT: bool>(
             }
         }
     }
+}
+
+/// A title on a fixed line: the capitals' height is centred in `h`, whatever the text
+/// (centring the ink of each text, as [`draw_text`] does, moves "zsh" and "Terminal" to
+/// different lines in the same title bar). `align` is within `[x, x + w)`; the text is
+/// expected to fit (see [`fit_measured_prefix`]). Returns the drawn text's left edge and width.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_title_text(
+    pixmap: &mut Pixmap,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    text: &str,
+    font: &FontSpec,
+    color: Color,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    align: TextAlign,
+) -> (i32, u32) {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight, Wrap};
+    if text.is_empty() || w == 0 || h == 0 {
+        return (x, 0);
+    }
+    let weight = match font.weight {
+        FontWeight::Bold => Weight::BOLD,
+        FontWeight::Normal => Weight::NORMAL,
+        FontWeight::Medium => Weight::MEDIUM,
+        FontWeight::SemiBold => Weight::SEMIBOLD,
+    };
+    let style = match font.style {
+        FontStyle::Italic => Style::Italic,
+        FontStyle::Normal => Style::Normal,
+    };
+    let attrs = Attrs::new().family(Family::Name(&font.family)).weight(weight).style(style);
+    let metrics = Metrics::new(font.size, font.size * 1.25);
+    // the capitals' top and the baseline, from an "H" in the same face
+    let mut reference = Buffer::new(font_system, metrics);
+    reference.set_size(None, None);
+    reference.set_text("H", &attrs, Shaping::Advanced, None);
+    reference.shape_until_scroll(font_system, false);
+    let mut cap: Option<(i32, i32)> = None;
+    for run in reference.layout_runs() {
+        for glyph in run.glyphs.iter() {
+            let physical = physical_snapped(glyph, (0.0, 0.0));
+            if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
+                let top = physical.y - image.placement.top + run.line_y as i32;
+                cap = Some((top, top + image.placement.height as i32));
+            }
+        }
+    }
+    let offset_y = match cap {
+        Some((top, bottom)) => ((h as i32 - (bottom - top) + 1) / 2 - top).max(0),
+        None => ((h as f32 - font.size) / 2.0).max(0.0) as i32,
+    };
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(None, None);
+    buffer.set_wrap(Wrap::None);
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
+    let mut text_width = 0f32;
+    for run in buffer.layout_runs() {
+        text_width = text_width.max(run.line_w);
+    }
+    let offset_x = match align {
+        TextAlign::Left => 0.0,
+        TextAlign::Center => ((w as f32 - text_width) / 2.0).max(0.0).round(),
+        TextAlign::Right => (w as f32 - text_width).max(0.0).round(),
+    };
+    let clip = TextClip { left: x as i64, top: y as i64, right: x as i64 + w as i64, bottom: y as i64 + h as i64 };
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs.iter() {
+            let physical = physical_snapped(glyph, (x as f32 + offset_x, y as f32 + offset_y as f32));
+            if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
+                let img_x = physical.x + image.placement.left;
+                let img_y = physical.y - image.placement.top + run.line_y as i32;
+                blend_glyph_image::<false>(pixmap, img_x, img_y, image, color, clip);
+            }
+        }
+    }
+    (x + offset_x as i32, text_width.ceil() as u32)
 }
 
 #[derive(Clone, Copy)]

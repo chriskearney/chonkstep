@@ -35,11 +35,107 @@ impl Shadow {
     }
 }
 
+/// The shape of a title bar's controls. `Glyphs` is the recipe's own line glyphs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Controls {
+    #[default]
+    Glyphs,
+    /// Filled discs with a darker rim.
+    Discs,
+    /// Rings: a plated through-hole. Hover fills them.
+    Vias,
+    /// Rounded squares.
+    Pads,
+    /// Outlined squares with a solid core. Hover fills them.
+    BondPads,
+}
+
+/// What runs along the top edge of a window's title bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TopLine {
+    #[default]
+    None,
+    /// One lighter pixel inside the border.
+    Highlight,
+    /// The border itself in the accent at the top, fading into the hairline down the corners.
+    Accent,
+    /// Two points of teal to indigo to violet, left to right.
+    Interference,
+}
+
+/// Window tokens on top of the modern recipe (first used by [`crate::forest`]): the controls'
+/// shape, place and colours, the title's place, the top edge, and hints for what a back end
+/// does around a window (shadow by focus, how a window appears, how a theme change is shown).
+/// All default to the recipe as it was, and a theme without them serialises as before. A back
+/// end that cannot do what a hint asks ignores it; `docs/forest-themes.md` lists which do what.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowChrome {
+    pub controls: Controls,
+    /// Close, minimise, zoom from the left edge, as on a Mac (else the recipe's right side).
+    pub left: bool,
+    /// The title centred over the window (else after the controls or the focus mark).
+    pub centered: bool,
+    /// The controls take their colours only while the pointer is over one of them.
+    pub neutral_at_rest: bool,
+    pub close: Color,
+    pub minimise: Color,
+    pub zoom: Color,
+    /// The controls of a window without focus, and of `neutral_at_rest` controls at rest.
+    pub idle: Color,
+    pub top_line: TopLine,
+    /// A one-pixel trace in the accent from the title to a via before the right edge.
+    pub trace: bool,
+    /// The frame's border stays one device pixel at every scale.
+    pub hairline: bool,
+    /// For a back end that draws no shadow or rounding for the modern recipe by itself: this
+    /// theme wants both. The Wayland and X11 back ends do not read it (they draw the recipe's
+    /// `shadow` and `frame.radius` for every modern theme, as far as each can).
+    pub effects: bool,
+    /// The shadow's alpha under a window without focus (0: as focused).
+    pub shadow_unfocused: u8,
+    /// A window's appearing: fade over `open_ms` while rising `open_rise` (0 ms: at once).
+    pub open_ms: u16,
+    pub open_rise: u16,
+    /// 3: ease-out cubic, 5: quint, 10: expo.
+    pub open_curve: u8,
+    /// A theme change cross-fades over this long (0: at once).
+    pub switch_ms: u16,
+}
+
+impl WindowChrome {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn normalized(mut self) -> Self {
+        self.open_ms = self.open_ms.min(400);
+        self.open_rise = self.open_rise.min(64);
+        self.switch_ms = self.switch_ms.min(400);
+        self
+    }
+    pub fn scaled(mut self, factor: f32) -> Self {
+        self.open_rise = (f32::from(self.open_rise) * factor).round() as u16;
+        self.normalized()
+    }
+    /// The hue of one control.
+    pub fn hue(&self, kind: wm_theme_api::ButtonKind) -> Color {
+        match kind {
+            wm_theme_api::ButtonKind::Close => self.close,
+            wm_theme_api::ButtonKind::Miniaturize => self.minimise,
+            _ => self.zoom,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chrome {
     /// Instrument-specific overrides use shared semantic colors by default.
     #[serde(default)]
     pub instrument: InstrumentChrome,
+    #[serde(default, skip_serializing_if = "WindowChrome::is_default")]
+    pub window: WindowChrome,
     #[serde(default, deserialize_with = "deserialize_shadow")]
     pub shadow: Shadow,
     #[serde(default, deserialize_with = "deserialize_frame")]
@@ -89,6 +185,7 @@ fn deserialize_overview<'de, D: serde::Deserializer<'de>>(
 impl Chrome {
     pub fn normalized(mut self) -> Self {
         self.instrument.accent_edge = self.instrument.accent_edge.min(64);
+        self.window = self.window.normalized();
         self.shadow = self.shadow.normalized();
         self.frame = self.frame.normalized();
         self.overview = self.overview.normalized();
@@ -103,8 +200,12 @@ impl Chrome {
         };
         self.instrument.accent_edge =
             ((f32::from(self.instrument.accent_edge) * factor).round() as u16).min(64);
+        self.window = self.window.scaled(factor);
         self.shadow = self.shadow.scaled(factor);
         self.frame = self.frame.scaled(factor);
+        if self.window.hairline {
+            self.frame.border = 1;
+        }
         self.overview = self.overview.scaled(factor);
         self
     }
@@ -124,6 +225,7 @@ impl Chrome {
         }
         Self {
             instrument: InstrumentChrome::default(),
+            window: WindowChrome::default(),
             shadow: Shadow::default(),
             frame: FrameMetrics::default(),
             overview: OverviewMetrics::default(),
@@ -155,6 +257,9 @@ pub const CHOICES: [(&str, &str); 3] = [
 ];
 
 pub fn theme(id: &str, appearance: Appearance) -> Option<Theme> {
+    if let Some(theme) = crate::forest::theme(id, appearance) {
+        return Some(theme);
+    }
     let (name, radius, title, edge, family, _native_light) = match id {
         "obsidian" => ("Obsidian", 3, 34, 2, "IBM Plex Mono", false),
         "washi" => ("Washi", 0, 32, 0, "IBM Plex Sans", true),
@@ -234,6 +339,7 @@ pub fn theme(id: &str, appearance: Appearance) -> Option<Theme> {
     };
     let chrome = Chrome {
         instrument,
+        window: WindowChrome::default(),
         shadow,
         frame: FrameMetrics {
             title_height: title,
@@ -456,7 +562,7 @@ pub(crate) fn round_corners(image: &mut Pixmap, rect: wm_theme_api::Rect, radius
     finish_corners(image, rect, radius, None);
 }
 
-fn finish_corners(
+pub(crate) fn finish_corners(
     image: &mut Pixmap,
     rect: wm_theme_api::Rect,
     radius: u32,

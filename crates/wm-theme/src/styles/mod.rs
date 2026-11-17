@@ -2,6 +2,7 @@
 //! in the engine; each recipe owns only its geometry and sparse painting.
 pub(crate) mod windowmaker;
 pub(crate) mod system7;
+pub(crate) mod forest;
 pub(crate) mod modern;
 pub(crate) mod beos;
 pub(crate) mod os2warp;

@@ -5,6 +5,11 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Four more themes, Clearing, Canopy, Wafer and Die Shot, each with its
+  own artwork, in the Theme menu of the Wayland and X11 sessions. They use
+  the modern recipe with window controls at the left as discs, rings,
+  pads or bond pads. No default changes; `docs/forest-themes.md` lists
+  what each session draws of them.
 - An external display whose EDID can only be read after it is set up,
   which Apple's display driver does at login and after a dock retrains
   its links, is probed again for about 16 seconds and adopted again

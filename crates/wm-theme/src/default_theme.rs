@@ -20,30 +20,6 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
 #[cfg(not(feature = "lcos"))]
-pub const CHOICES: [(&str, &str); 16] = [
-    ("nextstep-classic", "NeXTSTEP Classic"),
-    ("amber-phosphor", "Amber Phosphor"),
-    ("teal-blueprint", "Teal Blueprint"),
-    ("graphite", "Graphite"),
-    ("next-lavender", "NeXT Lavender"),
-    ("jade-lacquer", "Jade Lacquer"),
-    ("ivory-halftone", "Ivory Halftone"),
-    ("indigo-filament", "Indigo Filament"),
-    ("obsidian", "Obsidian"),
-    ("washi", "Washi"),
-    ("relay", "Relay"),
-    ("beos", "BeOS R5"),
-    ("os2-warp-4", "OS/2 Warp 4"),
-    ("system-7-classic", "System 7 Classic"),
-    ("system-7-light-gray", "System 7 Light Gray"),
-    ("system-7-dark-gray", "System 7 Dark Gray"),
-];
-
-/// The same list with the LCOS themes appended. Written out rather than
-/// concatenated so the array length is checked at compile time; the two
-/// must stay in step, and `every_choice_resolves` fails loudly if they
-/// do not.
-#[cfg(feature = "lcos")]
 pub const CHOICES: [(&str, &str); 20] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
@@ -61,6 +37,38 @@ pub const CHOICES: [(&str, &str); 20] = [
     ("system-7-classic", "System 7 Classic"),
     ("system-7-light-gray", "System 7 Light Gray"),
     ("system-7-dark-gray", "System 7 Dark Gray"),
+    ("clearing", "Clearing"),
+    ("canopy", "Canopy"),
+    ("wafer", "Wafer"),
+    ("die-shot", "Die Shot"),
+];
+
+/// The same list with the LCOS themes appended. Written out rather than
+/// concatenated so the array length is checked at compile time; the two
+/// must stay in step, and `every_choice_resolves` fails loudly if they
+/// do not.
+#[cfg(feature = "lcos")]
+pub const CHOICES: [(&str, &str); 24] = [
+    ("nextstep-classic", "NeXTSTEP Classic"),
+    ("amber-phosphor", "Amber Phosphor"),
+    ("teal-blueprint", "Teal Blueprint"),
+    ("graphite", "Graphite"),
+    ("next-lavender", "NeXT Lavender"),
+    ("jade-lacquer", "Jade Lacquer"),
+    ("ivory-halftone", "Ivory Halftone"),
+    ("indigo-filament", "Indigo Filament"),
+    ("obsidian", "Obsidian"),
+    ("washi", "Washi"),
+    ("relay", "Relay"),
+    ("beos", "BeOS R5"),
+    ("os2-warp-4", "OS/2 Warp 4"),
+    ("system-7-classic", "System 7 Classic"),
+    ("system-7-light-gray", "System 7 Light Gray"),
+    ("system-7-dark-gray", "System 7 Dark Gray"),
+    ("clearing", "Clearing"),
+    ("canopy", "Canopy"),
+    ("wafer", "Wafer"),
+    ("die-shot", "Die Shot"),
     ("lcos", "LCOS"),
     ("lunduke-walnut", "Lunduke Walnut"),
     ("lunduke-desk", "Lunduke Desk"),
@@ -92,6 +100,10 @@ pub fn all_themes() -> Vec<Theme> {
         crate::system7::theme("system-7-classic", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-light-gray", Appearance::Light).unwrap(),
         crate::system7::theme("system-7-dark-gray", Appearance::Light).unwrap(),
+        crate::forest::theme("clearing", Appearance::Light).unwrap(),
+        crate::forest::theme("canopy", Appearance::Dark).unwrap(),
+        crate::forest::theme("wafer", Appearance::Light).unwrap(),
+        crate::forest::theme("die-shot", Appearance::Dark).unwrap(),
         #[cfg(feature = "lcos")]
         lcos(),
         #[cfg(feature = "lcos")]
@@ -119,6 +131,7 @@ pub fn all_themes_in(appearance: Appearance) -> Vec<Theme> {
 /// stays for the callers (the SDK's `CHONKSTEP_THEME` fallback, tests)
 /// that have an id and nothing else.
 pub fn theme_by_id(id: &str) -> Option<Theme> {
+    let id = crate::forest::current_id(id);
     all_themes().into_iter().find(|t| t.id == id)
 }
 
@@ -1915,7 +1928,7 @@ mod tests {
     #[test]
     fn native_renditions_are_what_each_theme_originally_shipped_as() {
         for (id, _) in CHOICES {
-            let expected = if matches!(id,"ivory-halftone" | "washi" | "beos" | "os2-warp-4") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
+            let expected = if matches!(id,"ivory-halftone" | "washi" | "beos" | "os2-warp-4" | "clearing" | "wafer") || id.starts_with("system-7-") { Appearance::Light } else { Appearance::Dark };
             assert_eq!(native_appearance(id), Some(expected), "{id}");
             let by_id = theme_by_id(id).unwrap();
             assert_eq!(by_id.appearance, expected, "{id}");

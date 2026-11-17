@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn modern_compressed_frames_preserve_every_transparent_corner() {
         let fonts=FontState::new();
-        for (name,_) in wm_theme::modern::CHOICES {
+        for (name,_) in wm_theme::modern::CHOICES.into_iter().chain(wm_theme::forest::CHOICES) {
             for scale in [1.0,1.5,2.0] {
                 let engine=RasterThemeEngine::with_fonts_at_scale(wm_theme::modern::theme(name,wm_theme::Appearance::Dark).unwrap().scaled(scale),fonts.clone(),scale)
                     .with_style(DecorationStyle::Modern).unwrap();
@@ -409,7 +409,7 @@ mod tests {
     fn native_modern_solids_shapes_resize_and_style_cleanup() {
         let mut backend=X11Backend::connect_and_become_wm(None,1.0).unwrap();
         let fonts=FontState::new();
-        for (name,_) in wm_theme::modern::CHOICES {
+        for (name,_) in wm_theme::modern::CHOICES.into_iter().chain(wm_theme::forest::CHOICES) {
             let engine=RasterThemeEngine::with_fonts(wm_theme::modern::theme(name,wm_theme::Appearance::Dark).unwrap(),fonts.clone())
                 .with_style(DecorationStyle::Modern).unwrap();
             let request=DecorationRequest {content_size:Size::new(120,80),title:"Frame".into(),focused:true,resizable:true,buttons:Vec::new()};

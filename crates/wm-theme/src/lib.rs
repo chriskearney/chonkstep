@@ -4,6 +4,7 @@
 pub mod bluetooth;
 pub mod cascade;
 pub mod default_theme;
+pub mod forest;
 pub mod system7;
 pub mod beos;
 pub mod os2warp;

@@ -22,6 +22,15 @@ binary's provenance. Recorded per file.
   out of the shell binary. Both renditions are generated directly by
   that script rather than derived by `gen-wallpaper-renditions.py`.
 
+- `forest-clearing.jpg`, `forest-canopy.jpg`, `forest-wafer.jpg`,
+  `forest-die-shot.jpg` — drawn by `scripts/gen-forest-wallpapers.py`,
+  which is committed, so the artwork is reproducible from source. No
+  photograph, no third-party image and no font goes into them. The script
+  composes on a 2560x1600 canvas and writes 1920x1200 JPEG (quality 92,
+  4:4:4): the pictures are dithered gradients, which PNG stores at many
+  times the size. One rendition each; a Forest theme in its other
+  appearance wears its sibling's picture (`wallpaper.rs`, `jpeg`).
+
 ## Composited over Omarchy's bundled background art
 
 Ground taken from the artwork installed under
