@@ -91,6 +91,37 @@ impl GlyphCache {
     }
 }
 
+/// The Forest themes' titles are drawn for Inter and Source Code Pro, which this crate does
+/// not carry. Where the system has a family, its faces join the resident database (read once,
+/// here); where it has not, the carried face nearest to it answers to its name, so those
+/// themes look the same on every such system instead of taking whatever fallback comes first.
+fn forest_title_faces(general: &cosmic_text::FontSystem, resident: &mut cosmic_text::FontSystem) {
+    use cosmic_text::fontdb::{Language, Source};
+    for (family, stand_in) in [("Inter", "IBM Plex Sans"), ("Source Code Pro", "IBM Plex Mono")] {
+        let named = |db: &cosmic_text::fontdb::Database, name: &str| -> Vec<cosmic_text::fontdb::ID> {
+            db.faces().filter(|face| face.families.iter().any(|(known, _)| known == name)).map(|face| face.id).collect()
+        };
+        if !named(resident.db(), family).is_empty() {
+            continue;
+        }
+        let system = named(general.db(), family);
+        if !system.is_empty() {
+            for id in system {
+                if let Some(bytes) = general.db().with_face_data(id, |data, _| data.to_vec()) {
+                    resident.db_mut().load_font_source(Source::Binary(std::sync::Arc::new(bytes)));
+                }
+            }
+            continue;
+        }
+        for id in named(resident.db(), stand_in) {
+            if let Some(mut face) = resident.db().face(id).cloned() {
+                face.families = vec![(family.to_string(), Language::English_UnitedStates)];
+                resident.db_mut().push_face_info(face);
+            }
+        }
+    }
+}
+
 impl FontState {
     /// Loads the system font database. Expensive — call it once per
     /// session and clone the handle thereafter.
@@ -145,6 +176,7 @@ impl FontState {
                 general.db_mut().load_font_source(source.clone());
                 resident.db_mut().load_font_source(source);
             }
+            forest_title_faces(&general, &mut resident);
             *fonts = Some(resident);
         }
     }

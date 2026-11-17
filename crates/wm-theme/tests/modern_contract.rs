@@ -10,7 +10,7 @@ static ALLOCATOR: AllocationCounter = AllocationCounter;
 #[test]
 fn all_named_modern_palettes_and_controls_fit_the_existing_allocation_budgets() {
     let fonts = FontState::new();
-    for (name, _) in wm_theme::modern::CHOICES {
+    for (name, _) in wm_theme::modern::CHOICES.into_iter().chain(wm_theme::forest::CHOICES) {
         for appearance in [wm_theme::Appearance::Light, wm_theme::Appearance::Dark] {
             let engine = RasterThemeEngine::with_fonts(
                 wm_theme::modern::theme(name, appearance).unwrap(),

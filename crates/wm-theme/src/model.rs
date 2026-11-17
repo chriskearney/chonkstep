@@ -136,6 +136,10 @@ pub enum GradientDirection {
 pub enum FontWeight {
     Normal,
     Bold,
+    /// 500 and 600: a title in a medium weight reads as a Mac's does; a face without
+    /// them gives its nearest weight.
+    Medium,
+    SemiBold,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

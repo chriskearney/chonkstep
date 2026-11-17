@@ -2,6 +2,8 @@
 
 For period Macintosh window chrome and repeating desktop patterns, see
 [System 7 themes](system7-themes.md).
+Clearing, Canopy, Wafer and Die Shot build on this recipe; see
+[Forest themes](forest-themes.md).
 
 Obsidian, Washi and Relay share one modern rendering recipe. Their colors,
 typography and shell metrics live in the Theme payload; the compositor does not

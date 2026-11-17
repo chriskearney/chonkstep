@@ -29,6 +29,14 @@ pub enum Wallpaper {
     System7Classic,
     System7LightGray,
     System7DarkGray,
+    /// The artwork of the four Forest themes. Original to this project, drawn by
+    /// `scripts/gen-forest-wallpapers.py`. One picture each: a theme worn in its other
+    /// appearance takes its sibling's palette (`wm_theme::forest`), and so does its artwork
+    /// (Clearing with Canopy, Wafer with Die Shot).
+    Clearing,
+    Canopy,
+    Wafer,
+    DieShot,
     /// The LCOS theme's ground. Original to this project, built from
     /// the two colours LCOS's own boot splash is made of; see
     /// `scripts/gen-lcos-wallpaper.py`.
@@ -179,29 +187,6 @@ impl Wallpaper {
     /// The embedded artworks, in menu order. [`Self::Omarchy`] is not
     /// one: it has no pixels of its own.
     #[cfg(not(feature = "lcos"))]
-    pub const ALL: [Self; 16] = [
-        Self::LavenderGrid,
-        Self::AmberTerminal,
-        Self::TealBlueprint,
-        Self::GraphiteFold,
-        Self::ClassicLavender,
-        Self::JadeTerrace,
-        Self::IvoryOrb,
-        Self::IndigoWaves,
-        Self::Obsidian,
-        Self::Washi,
-        Self::Relay,
-        Self::BeOSBlue,
-        Self::OS2Warp,
-        Self::System7Classic,
-        Self::System7LightGray,
-        Self::System7DarkGray,
-    ];
-
-    /// The same artworks with the LCOS grounds appended. Spelled out
-    /// rather than concatenated so each array's length is compile-time
-    /// checked.
-    #[cfg(feature = "lcos")]
     pub const ALL: [Self; 20] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
@@ -219,6 +204,37 @@ impl Wallpaper {
         Self::System7Classic,
         Self::System7LightGray,
         Self::System7DarkGray,
+        Self::Clearing,
+        Self::Canopy,
+        Self::Wafer,
+        Self::DieShot,
+    ];
+
+    /// The same artworks with the LCOS grounds appended. Spelled out
+    /// rather than concatenated so each array's length is compile-time
+    /// checked.
+    #[cfg(feature = "lcos")]
+    pub const ALL: [Self; 24] = [
+        Self::LavenderGrid,
+        Self::AmberTerminal,
+        Self::TealBlueprint,
+        Self::GraphiteFold,
+        Self::ClassicLavender,
+        Self::JadeTerrace,
+        Self::IvoryOrb,
+        Self::IndigoWaves,
+        Self::Obsidian,
+        Self::Washi,
+        Self::Relay,
+        Self::BeOSBlue,
+        Self::OS2Warp,
+        Self::System7Classic,
+        Self::System7LightGray,
+        Self::System7DarkGray,
+        Self::Clearing,
+        Self::Canopy,
+        Self::Wafer,
+        Self::DieShot,
         Self::LundukeNavy,
         Self::WalnutGround,
         Self::DeskGround,
@@ -243,6 +259,10 @@ impl Wallpaper {
             Self::System7Classic => "System 7 Classic",
             Self::System7LightGray => "System 7 Light Gray",
             Self::System7DarkGray => "System 7 Dark Gray",
+            Self::Clearing => "Clearing",
+            Self::Canopy => "Canopy",
+            Self::Wafer => "Wafer",
+            Self::DieShot => "Die Shot",
             #[cfg(feature = "lcos")]
             Self::LundukeNavy => "Lunduke Navy",
             #[cfg(feature = "lcos")]
@@ -274,6 +294,10 @@ impl Wallpaper {
             Self::System7Classic => "system-7-classic-pattern",
             Self::System7LightGray => "system-7-light-gray-pattern",
             Self::System7DarkGray => "system-7-dark-gray-pattern",
+            Self::Clearing => "clearing",
+            Self::Canopy => "canopy",
+            Self::Wafer => "wafer",
+            Self::DieShot => "die-shot",
             #[cfg(feature = "lcos")]
             Self::LundukeNavy => "lunduke-navy",
             #[cfg(feature = "lcos")]
@@ -288,6 +312,8 @@ impl Wallpaper {
     }
 
     pub(crate) fn from_id(id: &str) -> Option<Self> {
+        // A choice saved under a Forest theme's earlier id is that theme's artwork.
+        let id = wm_theme::forest::current_id(id);
         Self::ALL
             .into_iter()
             .chain([Self::Omarchy])
@@ -369,6 +395,11 @@ impl Wallpaper {
             (Self::System7Classic, _) => (128,128,128),
             (Self::System7LightGray, _) => (191,191,191),
             (Self::System7DarkGray, _) => (64,64,64),
+            // Each palette's `background` (`wm_theme::forest`), by the appearance worn.
+            (Self::Clearing | Self::Canopy, Appearance::Light) => (0xdf, 0xe5, 0xdc),
+            (Self::Clearing | Self::Canopy, Appearance::Dark) => (0x0b, 0x12, 0x10),
+            (Self::Wafer | Self::DieShot, Appearance::Light) => (0xe9, 0xed, 0xf2),
+            (Self::Wafer | Self::DieShot, Appearance::Dark) => (0x07, 0x09, 0x0c),
             (Self::Obsidian, Appearance::Dark) => (22,25,23),
             (Self::Obsidian, Appearance::Light) => (225,227,217),
             (Self::Washi, Appearance::Light) => (229,224,211),
@@ -437,6 +468,8 @@ impl Wallpaper {
             (Self::GraphiteFold, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
             (Self::GraphiteFold, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/graphite-fold-light.png")),
             (Self::BeOSBlue | Self::ClassicLavender | Self::Obsidian | Self::Washi | Self::Relay | Self::System7Classic | Self::System7LightGray | Self::System7DarkGray, _) => None,
+            // JPEG, see `Self::jpeg`.
+            (Self::Clearing | Self::Canopy | Self::Wafer | Self::DieShot, _) => None,
             (Self::JadeTerrace, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
             (Self::JadeTerrace, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/jade-terrace-light.png")),
             (Self::IvoryOrb, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
@@ -452,6 +485,19 @@ impl Wallpaper {
             (Self::OS2Warp, _) => Some(include_bytes!("../assets/wallpapers/os2-warp-4-1024.png")),
             (Self::Omarchy, _) => None,
             (Self::HostArt(_), _) => None,
+        }
+    }
+
+    /// The Forest artworks: dithered gradients, which PNG cannot compress, so these four are
+    /// JPEG (1920x1200, about 1 MB together). The picture is the one drawn
+    /// for the appearance worn.
+    pub(crate) fn jpeg(self, appearance: Appearance) -> Option<&'static [u8]> {
+        match (self, appearance) {
+            (Self::Clearing | Self::Canopy, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/forest-clearing.jpg")),
+            (Self::Clearing | Self::Canopy, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/forest-canopy.jpg")),
+            (Self::Wafer | Self::DieShot, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/forest-wafer.jpg")),
+            (Self::Wafer | Self::DieShot, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/forest-die-shot.jpg")),
+            _ => None,
         }
     }
 
@@ -480,6 +526,10 @@ impl Wallpaper {
         if self == Self::Omarchy {
             let link = wm_theme::omarchy::current_background_path();
             return Self::omarchy_background(link.as_deref(), screen, appearance);
+        }
+        if let Some(bytes) = self.jpeg(appearance) {
+            let source = image::load_from_memory_with_format(bytes, image::ImageFormat::Jpeg).ok()?;
+            return Some(cover(&rgba_to_pixmap(source.into_rgba8())?, screen));
         }
         // The image codec is already linked for Omarchy backgrounds.
         // Its newer PNG decoder and RGB-to-RGBA conversion avoid the

@@ -257,6 +257,7 @@
 #   "jade-lacquer"
 #   "ivory-halftone"   (natively light; every theme has both moods)
 #   "indigo-filament"
+#   "clearing", "canopy", "wafer", "die-shot"   (docs/forest-themes.md)
 # or "omarchy", which is not a theme of its own but an instruction:
 # follow Omarchy. The desktop reads the palette Omarchy is currently
 # wearing (~/.local/state/omarchy/current/theme/colors.toml, the file
