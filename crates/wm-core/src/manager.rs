@@ -558,6 +558,10 @@ impl<B: Backend> WindowManager<B> {
     /// Sets the move-drag edge-attraction distance in pixels — the
     /// config file's `edge_resistance` entry. `0` disables snapping
     /// entirely (every position passes through untouched).
+    /// The edge-snapping distance in force, in pixels (`0`: off).
+    pub fn snap_threshold(&self) -> u32 {
+        self.snap_threshold.max(0) as u32
+    }
     pub fn set_snap_threshold(&mut self, px: u32) {
         self.snap_threshold = px.min(i32::MAX as u32) as i32;
     }
@@ -1935,6 +1939,15 @@ impl<B: Backend> WindowManager<B> {
         self.notifications.pop_front()
     }
 
+    /// The client whose window menu is about to be asked for (a queued
+    /// `Notification::WindowMenuRequested`), so a host can prepare its own rows first.
+    pub fn pending_window_menu(&self) -> Option<ClientId> {
+        self.notifications.iter().rev().find_map(|n| match n {
+            Notification::WindowMenuRequested { id, .. } => Some(*id),
+            _ => None,
+        })
+    }
+
     pub fn backend(&self) -> &B {
         &self.backend
     }
@@ -2210,6 +2223,15 @@ impl<B: Backend> WindowManager<B> {
         // the rule says on the head it opens on.
         let (output, workarea) = self.placement_output();
         let monitor = self.backend.monitors_ref().get(output).map(|m| m.geometry).unwrap_or(workarea);
+        // On a backend that fits new windows to the work area, the frame's invisible grab
+        // margin at the right and bottom (its resize band and corner) is kept on the screen too: placed by its
+        // visible bounds alone, a window as tall as the work area had its bottom resize band below the panel.
+        let workarea = if self.backend.fits_new_windows_to_workarea() && chrome.is_framed() {
+            let grab = layout.input_margin;
+            Rect::new(workarea.pos, Size::new(workarea.size.w.saturating_sub(grab).max(1), workarea.size.h.saturating_sub(grab).max(1)))
+        } else {
+            workarea
+        };
         let output_scale = self.backend.decoration_scale(monitor);
         let chrome_size = Size::new(
             layout.visual_bounds().size.w.saturating_sub(content.size.w),
@@ -2237,6 +2259,7 @@ impl<B: Backend> WindowManager<B> {
                 self.ui_scale,
             ),
         };
+        let mut fitted_to_workarea = false;
         if let Some(size) = floated {
             tracing::info!(?window, app = %client.class, title = %client.title, ?size, "a window rule places this window at a fixed size");
             client.geometry.size = size;
@@ -2246,6 +2269,20 @@ impl<B: Backend> WindowManager<B> {
             // one it got is a frame with a seam in it.
             request = Self::decoration_request(&client, None);
             layout = self.chrome_layout(chrome, &request, decoration_scale);
+        } else if self.backend.fits_new_windows_to_workarea() {
+            // A window that opens larger than the work area holds would
+            // have its frame's far edges, resize grips included, off the
+            // screen. A backend whose clients size themselves from the
+            // whole screen (a Mac application opening "as large as the
+            // display") asks for the frame to be made to fit instead.
+            let fitted = placement::fit_in(content.size, workarea, chrome_size, 1.0);
+            if fitted != content.size {
+                tracing::info!(?window, app = %client.class, asked = ?content.size, ?fitted, "a new window is made to fit the work area");
+                client.geometry.size = fitted;
+                fitted_to_workarea = true;
+                request = Self::decoration_request(&client, None);
+                layout = self.chrome_layout(chrome, &request, decoration_scale);
+            }
         }
         // Place the FRAME at the client's own requested position rather
         // than deriving it by subtracting the chrome offset from it.
@@ -2340,9 +2377,9 @@ impl<B: Backend> WindowManager<B> {
             ClientChrome::Full | ClientChrome::Edges => {
                 let frame = self.backend.create_decoration(window, &layout);
                 self.backend.set_frame_geometry(frame, frame_geom);
-                if floated.is_some() {
-                    // The only map path that overrides the client's own
-                    // size, and so the only one that has to tell it:
+                if floated.is_some() || fitted_to_workarea {
+                    // The map paths that override the client's own
+                    // size, and so the ones that have to tell it:
                     // framing a window neither resizes it nor implies a
                     // configure (`set_frame_geometry` moves the content
                     // rect and deliberately leaves its size alone —
@@ -2811,6 +2848,22 @@ impl<B: Backend> WindowManager<B> {
         if self.is_layout_managed(id) {
             return;
         }
+        // Where the frame is and what the work area under it holds, for the
+        // backends whose clients size themselves from the whole screen (see
+        // `Backend::fits_new_windows_to_workarea`): a window that grows itself
+        // past the work area after it is mapped is held to it as a new one is.
+        let fit = (committed && self.backend.fits_new_windows_to_workarea())
+            .then(|| self.clients.get(id))
+            .flatten()
+            .map(|client| {
+                let frame = client_frame_rect(client);
+                let center = Point::new(frame.pos.x + frame.size.w as i32 / 2, frame.pos.y + frame.size.h as i32 / 2);
+                let chrome = Size::new(
+                    frame.size.w.saturating_sub(client.geometry.size.w),
+                    frame.size.h.saturating_sub(client.geometry.size.h),
+                );
+                (self.usable_area_at(center), chrome, frame.pos)
+            });
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2862,6 +2915,22 @@ impl<B: Backend> WindowManager<B> {
             maximized_v,
             "configure request from a managed client — applying"
         );
+        let fit = fit.filter(|_| !client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+        if let Some((workarea, chrome, frame_pos)) = fit {
+            let fitted = placement::fit_in(size, workarea, chrome, 1.0);
+            let pos = placement::clamp_to(workarea, Size::new(fitted.w + chrome.w, fitted.h + chrome.h), frame_pos);
+            if fitted != size || pos != frame_pos {
+                tracing::info!(?id, asked = ?size, ?fitted, ?pos, "a window that grew past the work area is held to it");
+                client.geometry.pos.x += pos.x - frame_pos.x;
+                client.geometry.pos.y += pos.y - frame_pos.y;
+                // The client drew the size it asked for; it has to be told the one it gets.
+                let refit = fitted != size;
+                client.geometry.size = fitted;
+                self.bump_protocol_state_revision();
+                self.reflow_frame_internal(id, if refit { ReflowReason::Geometry } else { ReflowReason::ClientCommit });
+                return;
+            }
+        }
         if client.geometry.size == size {
             return;
         }
@@ -12093,6 +12162,20 @@ mod tests {
         assert_eq!(wm.focused_client(), Some(last));
         wm.cycle_application_windows(1);
         assert_eq!(wm.focused_client(), Some(first));
+    }
+
+    /// Command-Tab's H (the desk's switcher): the selected application is hidden whether or not
+    /// it has the focus; the focused one keeps it when another is hidden.
+    #[test]
+    fn hiding_an_application_that_is_not_focused_keeps_the_focus() {
+        let (mut wm, [first, browser, last]) = mac_windows();
+        assert_eq!(wm.focused_client(), Some(last));
+        wm.hide_application_of(browser);
+        assert!(wm.mac_client_hidden(browser) && !wm.mac_client_hidden(first));
+        assert_eq!(wm.focused_client(), Some(last));
+        wm.hide_application_of(first);
+        assert!(wm.mac_client_hidden(first) && wm.mac_client_hidden(last));
+        assert_ne!(wm.focused_client(), Some(last), "the focus left the hidden application");
     }
 
     #[test]

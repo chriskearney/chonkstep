@@ -235,6 +235,12 @@ pub trait Backend {
     }
     /// The backend has the native screenshot and recording selector.
     fn supports_native_capture(&self) -> bool { false }
+    /// New windows that ask for more room than the work area has are
+    /// opened at the size that fits, frame included. For backends whose
+    /// clients cannot know the work area and size themselves from the
+    /// screen (wm-darwin: AppKit sees the display, not the dock or the
+    /// frame the compositor will add).
+    fn fits_new_windows_to_workarea(&self) -> bool { false }
     fn show_live_overview(
         &mut self,
         surface: Self::ShellId,
