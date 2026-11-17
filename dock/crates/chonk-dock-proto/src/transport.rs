@@ -252,11 +252,24 @@ pub fn ensure_socket_dir(dir: &Path) -> io::Result<()> {
 
 /// Mints a fresh 128-bit connection token.
 ///
+/// The dockapp credential on a target without `getrandom(2)` (Darwin): the
+/// kernel's generator through `arc4random_buf(3)`, which cannot fail and is
+/// never seeded from the clock.
+#[cfg(not(target_os = "linux"))]
+pub fn mint_token() -> io::Result<[u8; TOKEN_BYTES]> {
+    let mut token = [0u8; TOKEN_BYTES];
+    // SAFETY: `token` is writable for exactly `token.len()` bytes and remains
+    // exclusively borrowed until the call returns.
+    unsafe { libc::arc4random_buf(token.as_mut_ptr().cast(), token.len()) };
+    Ok(token)
+}
+
 /// `getrandom(2)` with a `/dev/urandom` fallback for kernels or
 /// sandboxes that block the syscall. Never a PRNG seeded from the
 /// clock: this value is the credential a dockapp presents, and a
 /// guessable one turns "processes of this user" into "processes of this
 /// user that also know when the shell started".
+#[cfg(target_os = "linux")]
 pub fn mint_token() -> io::Result<[u8; TOKEN_BYTES]> {
     let mut token = [0u8; TOKEN_BYTES];
     // SAFETY: `token` is writable for exactly `token.len()` bytes and remains
@@ -289,6 +302,7 @@ pub fn mint_token() -> io::Result<[u8; TOKEN_BYTES]> {
 ///
 /// Separate function so the fix is testable: see
 /// `the_urandom_fallback_reads_sixteen_bytes_and_returns`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn read_urandom(token: &mut [u8; TOKEN_BYTES]) -> io::Result<()> {
     use std::io::Read;
     let mut file = std::fs::File::open("/dev/urandom")?;
@@ -650,6 +664,7 @@ impl Drop for SeqpacketListener {
 /// asynchronous, so the call either completes or reports `EAGAIN`.
 fn connect_nonblocking(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     let (addr, len) = sockaddr_un(path)?;
+    #[cfg(target_os = "linux")]
     // SAFETY: `socket` takes only integer arguments and returns a new raw fd,
     // whose error sentinel is checked by `cvt`.
     let raw = cvt(unsafe {
@@ -659,9 +674,15 @@ fn connect_nonblocking(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
             0,
         )
     })?;
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: as above; this target has no creation flags, see
+    // `set_cloexec_nonblock`.
+    let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind, 0) })?;
     // SAFETY: `raw` is newly created and nonnegative, with no other Rust
     // owner; ownership transfers to this `OwnedFd` exactly once.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    #[cfg(not(target_os = "linux"))]
+    let fd = set_cloexec_nonblock(fd)?;
     // SAFETY: `addr` remains live for the computed initialized length and the
     // owned descriptor remains open for the duration of the syscall.
     cvt(unsafe {
@@ -700,6 +721,7 @@ fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     // process's life where the listening fd could block an
     // `accept()` on an event-loop pass that turned out to have no
     // pending connection.
+    #[cfg(target_os = "linux")]
     // SAFETY: `socket` takes only integer arguments and returns a new raw fd,
     // whose error sentinel is checked by `cvt`.
     let raw = cvt(unsafe {
@@ -709,9 +731,15 @@ fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
             0,
         )
     })?;
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: as above; this target has no creation flags, see
+    // `set_cloexec_nonblock`.
+    let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind, 0) })?;
     // SAFETY: `raw` is newly created and nonnegative, with no other Rust
     // owner; ownership transfers to this `OwnedFd` exactly once.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    #[cfg(not(target_os = "linux"))]
+    let fd = set_cloexec_nonblock(fd)?;
     // SAFETY: `addr` remains live for the computed initialized length and the
     // owned descriptor remains open for the duration of the syscall.
     cvt(unsafe {
@@ -801,6 +829,7 @@ fn clear_stale_socket(path: &Path, kind: libc::c_int) -> io::Result<()> {
 /// process launched between `accept` and a separate `fcntl` would
 /// inherit another peer's socket.
 fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
+    #[cfg(target_os = "linux")]
     // SAFETY: `listener` is used only as a kernel handle; both optional
     // address outputs are null, and `accept4` returns a new fd or -1.
     let raw = unsafe {
@@ -811,6 +840,9 @@ fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
             libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
         )
     };
+    #[cfg(not(target_os = "linux"))]
+    // SAFETY: as above, with `accept`; this target has no `accept4`.
+    let raw = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
     if raw < 0 {
         let err = io::Error::last_os_error();
         return match err.kind() {
@@ -820,11 +852,55 @@ fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
     }
     // SAFETY: successful `accept4` returned a new nonnegative descriptor with
     // no other Rust owner; ownership transfers exactly once.
-    Ok(Some(unsafe { OwnedFd::from_raw_fd(raw) }))
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    #[cfg(not(target_os = "linux"))]
+    let fd = set_cloexec_nonblock(fd)?;
+    Ok(Some(fd))
+}
+
+/// Close-on-exec and non-blocking on a descriptor this process has just
+/// created, for a target without `SOCK_CLOEXEC`, `SOCK_NONBLOCK` and
+/// `accept4` (Darwin). Unlike the creation flags this is not atomic with a
+/// `fork` on another thread: a process on such a target must not start
+/// programs while it creates or accepts sockets. A failure closes the
+/// descriptor.
+#[cfg(not(target_os = "linux"))]
+fn set_cloexec_nonblock(fd: OwnedFd) -> io::Result<OwnedFd> {
+    let raw = fd.as_raw_fd();
+    // SAFETY: `raw` is owned by `fd` and live for the whole function; these
+    // `fcntl` commands take and return integers only.
+    unsafe {
+        let descriptor_flags = cvt(libc::fcntl(raw, libc::F_GETFD))?;
+        cvt(libc::fcntl(raw, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC))?;
+        let status_flags = cvt(libc::fcntl(raw, libc::F_GETFL))?;
+        cvt(libc::fcntl(raw, libc::F_SETFL, status_flags | libc::O_NONBLOCK))?;
+    }
+    Ok(fd)
+}
+
+/// The peer of a connected socket on a target without `SO_PEERCRED`
+/// (Darwin): `getpeereid(3)` for the ids, `LOCAL_PEERPID` for the process.
+/// The pid is the socket's last owner as the kernel records it, read
+/// separately from the ids; it is not the connection-time snapshot Linux gives.
+#[cfg(not(target_os = "linux"))]
+pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
+    let (mut uid, mut gid) = (libc::uid_t::MAX, libc::gid_t::MAX);
+    // SAFETY: both outputs are live and of the exact types the call writes.
+    cvt(unsafe { libc::getpeereid(fd, &mut uid, &mut gid) })?;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: `pid` is writable storage of `len` bytes and `len` is a live
+    // writable socklen; `fd` is only a kernel handle.
+    cvt(unsafe { libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID, (&mut pid as *mut libc::pid_t).cast(), &mut len) })?;
+    if pid <= 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "the peer has no process id"));
+    }
+    Ok(PeerCredentials { pid, uid, gid })
 }
 
 /// `SO_PEERCRED` on a borrowed descriptor — see
 /// [`Seqpacket::peer_credentials`].
+#[cfg(target_os = "linux")]
 pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
     // SAFETY: all-zero is a valid initial representation for this C output
     // structure, and the kernel fills it before fields are read.
