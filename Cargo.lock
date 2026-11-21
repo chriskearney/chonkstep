@@ -3498,6 +3498,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wm-darwin"
+version = "0.7.2"
+dependencies = [
+ "libc",
+ "smithay",
+ "tempfile",
+ "tiny-skia",
+ "wayland-client",
+ "wayland-protocols",
+ "wm-core",
+ "wm-theme",
+ "wm-theme-api",
+]
+
+[[package]]
 name = "wm-theme"
 version = "0.7.2"
 dependencies = [
