@@ -484,6 +484,33 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # The Darwin back end (crates/wm-darwin) only builds with its
+  # `darwin-backend` feature, which nothing in the Linux session turns on,
+  # so `lint` and `test` above never see it. This job lints it for the
+  # Linux host and for aarch64-apple-darwin with the workspace's flags, and
+  # runs its wire tests on Linux against an in-memory framebuffer. Linking
+  # a Darwin binary needs SiliconForest's SDK and static libraries, which a
+  # GitHub runner doesn't have, so that stays a local step.
+  darwin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install the libraries the host tests link
+        # Smithay's seat keymap needs libxkbcommon; the wire tests' clients
+        # are pure Rust.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev
+
+      - name: Lint for both targets and run the host tests
+        run: scripts/check.sh darwin
+
   # Lint. This job exists because of one specific incident and one
   # specific class of bug.
   #
