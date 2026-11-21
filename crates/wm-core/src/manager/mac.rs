@@ -120,6 +120,24 @@ impl<B: Backend> WindowManager<B> {
         self.bump_protocol_state_revision();
     }
 
+    /// Hide the application `member` belongs to (Command-Tab's H on the selected application):
+    /// as `hide_application(false)` for it, whether or not it has the focus.
+    pub fn hide_application_of(&mut self, member: ClientId) {
+        if !self.clients.contains_key(member) {
+            return;
+        }
+        let app = self.application_members(member);
+        let ids: Vec<_> = self.clients.keys().filter(|id| app.contains(id)).collect();
+        self.mac_hidden.extend(ids.iter().copied());
+        for id in ids {
+            self.hide_client_surface(id);
+        }
+        if let Some(focused) = self.focused.filter(|f| app.contains(f)) {
+            self.focus_successor_of(focused);
+        }
+        self.bump_protocol_state_revision();
+    }
+
     /// Ask every application window to close. Never escalate an unsupported
     /// close protocol into termination; applications retain their save prompts.
     pub fn quit_application(&mut self) {
@@ -279,6 +297,30 @@ impl<B: Backend> WindowManager<B> {
         {
             self.deminiaturize(id);
         }
+    }
+
+    /// Bring an application to the front through one of its windows, as the switcher's commit
+    /// does: its hidden windows are shown again, a minimised one comes back, its Space is
+    /// shown, and the window gets the focus. For a host that runs its own switcher.
+    pub fn activate_application(&mut self, id: ClientId) {
+        if self.cycle.is_some() {
+            self.cycle_end(false);
+        }
+        if self.clients.get(id).is_none() {
+            return;
+        }
+        self.reveal_application(id);
+        if self.clients.get(id).is_some_and(|c| c.lifecycle == Lifecycle::Miniaturized) {
+            self.deminiaturize(id);
+        }
+        self.bring_workspace_into_view(id);
+        if let Some(client) = self.clients.get(id) {
+            let (window, size) = (client.window, client.geometry.size);
+            self.unshade(id);
+            self.focus_client(id);
+            self.backend.refresh_client(window, size);
+        }
+        self.bump_protocol_state_revision();
     }
 
     pub fn cycle_applications(&mut self, direction: i32) {

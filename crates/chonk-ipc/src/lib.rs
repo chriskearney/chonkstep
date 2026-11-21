@@ -41,6 +41,14 @@ fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> 
     for (slot, &byte) in addr.sun_path.iter_mut().zip(bytes) {
         *slot = byte as libc::c_char;
     }
+    #[cfg(target_os = "macos")]
+    {
+        // XNU sys/un.h: sun_len includes the terminating NUL.
+        let len = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+        addr.sun_len = u8::try_from(len).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Unix address too long"))?;
+        Ok((addr, len as libc::socklen_t))
+    }
+    #[cfg(not(target_os = "macos"))]
     Ok((addr, std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t))
 }
 
@@ -106,14 +114,54 @@ pub fn ensure_socket_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn connect_nonblocking(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
-    let (addr, len) = sockaddr_un(path)?;
+// Darwin lacks socket/accept4 creation flags. Complete both flags before
+// publishing an owned descriptor. This is not atomic with concurrent fork/exec;
+// the desktop session must serialize socket creation and application spawning.
+#[cfg(any(target_os = "macos", test))]
+fn configure_owned_with(
+    fd: OwnedFd,
+    mut operation: impl FnMut(RawFd, libc::c_int, libc::c_int) -> io::Result<libc::c_int>,
+) -> io::Result<OwnedFd> {
+    let raw = fd.as_raw_fd();
+    let flags = operation(raw, libc::F_GETFL, 0)?;
+    operation(raw, libc::F_SETFL, flags | libc::O_NONBLOCK)?;
+    let descriptor_flags = operation(raw, libc::F_GETFD, 0)?;
+    operation(raw, libc::F_SETFD, descriptor_flags | libc::FD_CLOEXEC)?;
+    let actual_flags = operation(raw, libc::F_GETFL, 0)?;
+    let actual_descriptor_flags = operation(raw, libc::F_GETFD, 0)?;
+    if actual_flags & libc::O_NONBLOCK == 0 || actual_descriptor_flags & libc::FD_CLOEXEC == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "socket flags did not stick"));
+    }
+    Ok(fd)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn configure_owned(fd: OwnedFd) -> io::Result<OwnedFd> {
+    configure_owned_with(fd, |fd, command, value| {
+        // SAFETY: fd is owned and live throughout this call. All used fcntl
+        // commands take an integer third argument (ignored by the getters).
+        cvt(unsafe { libc::fcntl(fd, command, value) })
+    })
+}
+
+fn new_nonblocking_socket(kind: libc::c_int) -> io::Result<OwnedFd> {
+    #[cfg(not(target_os = "macos"))]
     // SAFETY: `socket` takes only integer arguments and returns a new raw fd,
     // whose error sentinel is checked by `cvt`.
     let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) })?;
-    // SAFETY: `raw` is newly created and nonnegative, with no other Rust
-    // owner; ownership transfers to this `OwnedFd` exactly once.
+    #[cfg(target_os = "macos")]
+    // SAFETY: as above; Darwin has no creation flags, see `configure_owned`.
+    let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind, 0) })?;
+    // SAFETY: socket returned a fresh, checked, nonnegative descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    #[cfg(target_os = "macos")]
+    let fd = configure_owned(fd)?;
+    Ok(fd)
+}
+
+fn connect_nonblocking(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
+    let (addr, len) = sockaddr_un(path)?;
+    let fd = new_nonblocking_socket(kind)?;
     // SAFETY: `addr` remains live for the computed initialized length and the
     // owned descriptor remains open for the duration of the syscall.
     cvt(unsafe { libc::connect(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
@@ -127,16 +175,9 @@ fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     clear_stale_socket(path, kind)?;
 
     let (addr, len) = sockaddr_un(path)?;
-    // SOCK_NONBLOCK at creation, so there is no instant in this
-    // process's life where the listening fd could block an
-    // `accept()` on an event-loop pass that turned out to have no
-    // pending connection.
-    // SAFETY: `socket` takes only integer arguments and returns a new raw fd,
-    // whose error sentinel is checked by `cvt`.
-    let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) })?;
-    // SAFETY: `raw` is newly created and nonnegative, with no other Rust
-    // owner; ownership transfers to this `OwnedFd` exactly once.
-    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // Linux sets flags atomically at creation; Darwin configures and verifies
+    // them before publication. Neither exposes a blocking listener to callers.
+    let fd = new_nonblocking_socket(kind)?;
     // SAFETY: `addr` remains live for the computed initialized length and the
     // owned descriptor remains open for the duration of the syscall.
     cvt(unsafe { libc::bind(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
@@ -154,6 +195,15 @@ fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     // arguments or additional memory-safety preconditions.
     cvt(unsafe { libc::listen(fd.as_raw_fd(), BACKLOG) })?;
     Ok(fd)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn refuse_ambiguous_darwin_endpoint(path: &Path, error: io::Error) -> io::Result<()> {
+    // XNU also returns ECONNREFUSED when a live accept queue is full.
+    // Connect errno cannot establish that we own an abandoned pathname.
+    Err(io::Error::new(error.kind(), format!(
+        "cannot establish that {} is abandoned; refusing to unlink: {error}", path.display()
+    )))
 }
 
 fn clear_stale_socket(path: &Path, kind: libc::c_int) -> io::Result<()> {
@@ -195,16 +245,26 @@ fn clear_stale_socket(path: &Path, kind: libc::c_int) -> io::Result<()> {
             io::ErrorKind::AddrInUse,
             format!("{} is a live socket of another type; refusing to replace it", path.display()),
         )),
+        // No Darwin connect error, including ECONNREFUSED, proves staleness.
+        #[cfg(target_os = "macos")]
+        Err(e) => refuse_ambiguous_darwin_endpoint(path, e),
+        #[cfg(not(target_os = "macos"))]
         Err(_) => std::fs::remove_file(path),
     }
 }
 
 fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
+    #[cfg(not(target_os = "macos"))]
     // SAFETY: `listener` is used only as a kernel handle; both optional
     // address outputs are null, and `accept4` returns a new fd or -1.
     let raw = unsafe {
         libc::accept4(listener, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
     };
+    #[cfg(target_os = "macos")]
+    // SAFETY: as above, with `accept`: Darwin has no `accept4`. The listener
+    // was verified nonblocking; the accepted descriptor is configured below
+    // before a caller can see it.
+    let raw = unsafe { libc::accept(listener, std::ptr::null_mut(), std::ptr::null_mut()) };
     if raw < 0 {
         let err = io::Error::last_os_error();
         return match err.kind() {
@@ -212,11 +272,15 @@ fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
             _ => Err(err),
         };
     }
-    // SAFETY: successful `accept4` returned a new nonnegative descriptor with
+    // SAFETY: successful accept returned a new nonnegative descriptor with
     // no other Rust owner; ownership transfers exactly once.
-    Ok(Some(unsafe { OwnedFd::from_raw_fd(raw) }))
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    #[cfg(target_os = "macos")]
+    let fd = configure_owned(fd)?;
+    Ok(Some(fd))
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
     // SAFETY: all-zero is a valid initial representation for this C output
     // structure, and the kernel fills it before fields are read.
@@ -226,6 +290,28 @@ pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
     // itself is a live writable socklen; `fd` is only a kernel handle.
     cvt(unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) })?;
     Ok(PeerCredentials { pid: cred.pid, uid: cred.uid, gid: cred.gid })
+}
+
+/// Real Darwin AF_UNIX credentials. PID is XNU's peer socket last_pid,
+/// not a claim of Linux SO_PEERCRED's stable creator-PID semantics. UID/GID
+/// come from the connection credentials via getpeereid; these separate reads
+/// are not an atomic process-identity snapshot or a liveness lease.
+#[cfg(target_os = "macos")]
+pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
+    let mut uid = libc::uid_t::MAX;
+    let mut gid = libc::gid_t::MAX;
+    // SAFETY: both output pointers have the exact target uid/gid types.
+    cvt(unsafe { libc::getpeereid(fd, &mut uid, &mut gid) })?;
+    let mut pid: libc::pid_t = 0;
+    let mut len = std::mem::size_of_val(&pid) as libc::socklen_t;
+    // SAFETY: pid and len are live writable outputs of the declared sizes.
+    // XNU (uipc_usrreq.c) supports SOL_LOCAL/LOCAL_PEERPID on connected sockets.
+    cvt(unsafe { libc::getsockopt(fd, libc::SOL_LOCAL, libc::LOCAL_PEERPID,
+        (&mut pid as *mut libc::pid_t).cast(), &mut len) })?;
+    if len as usize != std::mem::size_of_val(&pid) || pid <= 0 || uid == libc::uid_t::MAX || gid == libc::gid_t::MAX {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "incomplete local peer credentials"));
+    }
+    Ok(PeerCredentials { pid, uid, gid })
 }
 
 pub fn peer_is_this_user_on(fd: RawFd) -> io::Result<bool> {
@@ -294,8 +380,9 @@ impl StreamListener {
 
     /// Accepts one pending connection as a socket that is already
     /// `O_NONBLOCK` and `CLOEXEC`, or `Ok(None)` if none is waiting.
-    /// See the private `accept_nonblocking` helper for why it is `accept4` and not
-    /// `accept` + `fcntl`.
+    /// Linux sets both flags atomically with accept4. Darwin configures and
+    /// verifies them before publication; concurrent spawning needs the separate
+    /// audited session-spawn contract described by configure_owned_with.
     pub fn accept(&self) -> io::Result<Option<Stream>> {
         Ok(accept_nonblocking(self.fd.as_raw_fd())?.map(Stream::from_fd))
     }
@@ -457,3 +544,7 @@ mod tests {
         assert!(peer_is_this_user_or_root_on(theirs.as_raw_fd()).expect("SO_PEERCRED"));
     }
 }
+
+#[cfg(test)]
+#[path = "darwin_fd_tests.rs"]
+mod darwin_fd_tests;
