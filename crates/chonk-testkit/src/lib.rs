@@ -1111,16 +1111,36 @@ fn compositor_binary() -> Result<PathBuf, String> {
 /// bare ENOENT.
 pub fn profile_binary(name: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // target/debug/deps/e2e-... -> target/debug/<name>
-    let profile_dir = exe.parent().and_then(Path::parent).ok_or("cannot locate the target profile directory")?;
-    let bin = profile_dir.join(name);
-    if !bin.exists() {
-        return Err(format!(
-            "{} not found — build it first: cargo build -p chonkstep-wayland -p chonk-testkit (scripts/e2e.sh does this)",
-            bin.display()
-        ));
+    find_profile_binary(&exe, name)
+}
+
+/// The search behind [`profile_binary`], split out so both layouts can
+/// be tested without a build.
+///
+/// Up to cargo 1.99 a test ran from `target/debug/deps/<test>-<hash>`,
+/// so the profile directory was always two levels up. Cargo 1.100's
+/// build-directory layout runs it from
+/// `target/debug/build/<package>/<hash>/out/<test>-<hash>`, while the
+/// binaries it builds still land in `target/debug`. The fixed
+/// two-level step then looked in `target/debug/build/<package>` and
+/// every end-to-end test failed before a compositor started. Walking
+/// up until a directory holds the binary finds `target/debug` under
+/// either layout, however deep the test executable sits.
+fn find_profile_binary(exe: &Path, name: &str) -> Result<PathBuf, String> {
+    if let Some(bin) = exe.ancestors().skip(1).map(|dir| dir.join(name)).find(|bin| bin.is_file()) {
+        return Ok(bin);
     }
-    Ok(bin)
+    // Name the directory the old layout used, so the message still
+    // points somewhere sensible.
+    let expected = exe
+        .parent()
+        .and_then(Path::parent)
+        .map(|dir| dir.join(name))
+        .ok_or("cannot locate the target profile directory")?;
+    Err(format!(
+        "{} not found — build it first: cargo build -p chonkstep-wayland -p chonk-testkit (scripts/e2e.sh does this)",
+        expected.display()
+    ))
 }
 
 // -- the door client -----------------------------------------------------
@@ -2324,6 +2344,56 @@ pub fn near(actual: [f64; 3], expected: [u8; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch tree under the system temp directory, removed on drop.
+    struct ScratchTree(PathBuf);
+
+    impl ScratchTree {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!("chonk-testkit-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+
+        fn file(&self, relative: &str) -> PathBuf {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+            path
+        }
+    }
+
+    impl Drop for ScratchTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn profile_binary_is_found_from_the_old_deps_layout() {
+        let tree = ScratchTree::new("deps-layout");
+        let bin = tree.file("target/debug/chonkstep-wayland");
+        let exe = tree.file("target/debug/deps/mac_mode-0123456789abcdef");
+        assert_eq!(find_profile_binary(&exe, "chonkstep-wayland").unwrap(), bin);
+    }
+
+    #[test]
+    fn profile_binary_is_found_from_the_cargo_1_100_build_dir_layout() {
+        let tree = ScratchTree::new("build-dir-layout");
+        let bin = tree.file("target/debug/chonkstep-wayland");
+        let exe = tree.file("target/debug/build/chonk-testkit/d2c2591c80a77c53/out/mac_mode-d2c2591c80a77c53");
+        assert_eq!(find_profile_binary(&exe, "chonkstep-wayland").unwrap(), bin);
+    }
+
+    #[test]
+    fn a_missing_profile_binary_names_the_profile_directory_and_the_build_command() {
+        let tree = ScratchTree::new("missing");
+        let exe = tree.file("target/debug/deps/mac_mode-0123456789abcdef");
+        let error = find_profile_binary(&exe, "chonkstep-wayland-not-built").unwrap_err();
+        assert!(error.contains("target/debug/chonkstep-wayland-not-built not found"), "{error}");
+        assert!(error.contains("cargo build -p chonkstep-wayland -p chonk-testkit"), "{error}");
+    }
 
     #[test]
     fn boot_errors_include_only_the_useful_end_of_the_compositor_log() {
