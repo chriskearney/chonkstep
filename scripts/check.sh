@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-    echo "Usage: scripts/check.sh [all|lint|docs|unit|wayland-unit|gles|harness]" >&2
+    echo "Usage: scripts/check.sh [all|lint|docs|unit|wayland-unit|gles|harness|darwin]" >&2
 }
 
 check_lint() {
@@ -44,6 +44,26 @@ check_gles() {
     scripts/check-vendored-smithay-tests.sh
 }
 
+check_darwin() {
+    # The Darwin back end is behind a feature the workspace never turns on,
+    # so `lint` and `unit` don't see it. Lint it with the same flags for the
+    # Linux host (where its wire tests run) and for the Darwin target, which
+    # type-checks the native presenter, HID and GPU code without linking.
+    local flags=(-D warnings -D clippy::disallowed_methods -D clippy::disallowed_types
+        -D clippy::undocumented_unsafe_blocks)
+    cargo clippy --locked -p wm-darwin --features darwin-backend --all-targets --no-deps -- "${flags[@]}"
+    # A local `all` without the Darwin target skips that half and says so;
+    # CI installs the target, and there a missing one is a failure.
+    if [ -n "${CI:-}" ] || [ -d "$(rustc --print target-libdir --target aarch64-apple-darwin 2>/dev/null)" ]; then
+        cargo clippy --locked -p wm-darwin --features darwin-backend --all-targets --no-deps \
+            --target aarch64-apple-darwin -- "${flags[@]}"
+    else
+        echo "check.sh darwin: aarch64-apple-darwin is not installed; skipping its lint" \
+            "(rustup target add aarch64-apple-darwin)" >&2
+    fi
+    cargo test --locked -p wm-darwin --features darwin-backend
+}
+
 check_harness() {
     python3 -B -m unittest discover -s scripts/tests -v
 }
@@ -60,6 +80,7 @@ case "${1:-all}" in
         check_wayland_unit
         check_gles
         check_harness
+        check_darwin
         ;;
     lint) check_lint ;;
     docs) check_docs ;;
@@ -67,6 +88,7 @@ case "${1:-all}" in
     wayland-unit) check_wayland_unit ;;
     gles) check_gles ;;
     harness) check_harness ;;
+    darwin) check_darwin ;;
     -h|--help) usage ;;
     *) usage; exit 2 ;;
 esac

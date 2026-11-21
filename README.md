@@ -174,6 +174,12 @@ transient navigation and Omarchy integration. `wm-theme` owns themed rendering,
 and `chonk-hyprland-ipc` implements the compatibility interface. Desktop plugins, [Chonk Dock](dock/README.md),
 and agent adapters run outside these compositor components.
 
+`wm-darwin` is an experimental third back end that runs the same window
+manager and themes as a Wayland compositor on Darwin, for
+[SiliconForest](https://github.com/chriskearney/siliconforest) on Apple Silicon.
+It only builds with its `darwin-backend` feature, so the Linux session never
+compiles it. See [its README](crates/wm-darwin/README.md).
+
 ```sh
 scripts/check.sh all
 scripts/e2e.sh --headless --release

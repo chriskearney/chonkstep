@@ -13,7 +13,7 @@ CHECK = Path(__file__).resolve().parents[1] / "check.sh"
 
 
 class PreflightTests(unittest.TestCase):
-    def run_check(self, *arguments, fail=""):
+    def run_check(self, *arguments, fail="", ci="1"):
         with tempfile.TemporaryDirectory(prefix="chonk-check-test-") as temporary:
             root = Path(temporary)
             log = root / "commands.jsonl"
@@ -35,11 +35,13 @@ if name + ":" + sys.argv[1] == os.environ.get("CHONK_CHECK_TEST_FAIL"):
     sys.exit(42)
 ''')
             stub.chmod(0o755)
-            for name in ("cargo", "python3"):
+            # rustc only answers check.sh darwin's "is the Darwin target
+            # installed?" question; the stub prints nothing, which reads as no.
+            for name in ("cargo", "python3", "rustc"):
                 (root / name).symlink_to(stub)
             env = {**os.environ, "PATH": f"{root}{os.pathsep}{os.environ['PATH']}",
                    "CHONK_CHECK_TEST_LOG": str(log), "CHONK_CHECK_TEST_FAIL": fail,
-                   "RUSTDOCFLAGS": "--cfg preflight_test"}
+                   "RUSTDOCFLAGS": "--cfg preflight_test", "CI": ci}
             result = subprocess.run([str(CHECK), *arguments], cwd=root, env=env,
                                     capture_output=True, text=True, timeout=10)
             commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
@@ -51,7 +53,8 @@ if name + ":" + sys.argv[1] == os.environ.get("CHONK_CHECK_TEST_FAIL"):
         self.assertEqual([(item["tool"], item["args"][0]) for item in commands],
                          [("cargo", "clippy"), ("cargo", "doc"), ("cargo", "test"),
                           ("cargo", "test"), ("python3", "scripts/check-native-tests.py"),
-                          ("python3", "scripts/check-native-tests.py"), ("python3", "-B")])
+                          ("python3", "scripts/check-native-tests.py"), ("python3", "-B"),
+                          ("cargo", "clippy"), ("cargo", "clippy"), ("cargo", "test")])
         for item in commands:
             self.assertEqual(item["cwd"], str(CHECK.parent.parent))
             if item["tool"] == "cargo":
@@ -90,6 +93,28 @@ if name + ":" + sys.argv[1] == os.environ.get("CHONK_CHECK_TEST_FAIL"):
                 result, commands = self.run_check(mode)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual([(item["tool"], item["args"]) for item in commands], [(tool, expected)])
+
+    def test_darwin_lints_both_targets_with_the_ci_flags_then_runs_host_tests(self):
+        flags = ["-D", "warnings", "-D", "clippy::disallowed_methods", "-D", "clippy::disallowed_types",
+                 "-D", "clippy::undocumented_unsafe_blocks"]
+        lint = ["clippy", "--locked", "-p", "wm-darwin", "--features", "darwin-backend",
+                "--all-targets", "--no-deps"]
+        result, commands = self.run_check("darwin")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([(item["tool"], item["args"]) for item in commands], [
+            ("cargo", lint + ["--", *flags]),
+            ("cargo", lint + ["--target", "aarch64-apple-darwin", "--", *flags]),
+            ("cargo", ["test", "--locked", "-p", "wm-darwin", "--features", "darwin-backend"]),
+        ])
+
+    def test_darwin_outside_ci_skips_only_the_missing_target_and_says_so(self):
+        result, commands = self.run_check("darwin", ci="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("aarch64-apple-darwin is not installed", result.stderr)
+        cargo = [item["args"] for item in commands if item["tool"] == "cargo"]
+        self.assertEqual(len(cargo), 2)
+        self.assertNotIn("--target", cargo[0])
+        self.assertEqual(cargo[1][0], "test")
 
     def test_gles_runs_compositor_and_vendor_serially_with_software_rendering(self):
         result, commands = self.run_check("gles")

@@ -5,6 +5,11 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- An experimental Darwin back end, `wm-darwin`, runs the window manager
+  and themes as a Wayland compositor on SiliconForest. It is off unless
+  built with `--features darwin-backend`; Linux builds and packages don't
+  change. CI lints it for Linux and `aarch64-apple-darwin` and runs its
+  wire tests on Linux.
 - An external display whose EDID can only be read after it is set up,
   which Apple's display driver does at login and after a dock retrains
   its links, is probed again for about 16 seconds and adopted again
