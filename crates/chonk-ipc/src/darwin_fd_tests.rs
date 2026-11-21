@@ -1,5 +1,6 @@
 //! Host policy/ownership tests. These do not execute the Darwin ABI on Linux.
 use super::*;
+use std::io::Read;
 use std::os::unix::net::UnixStream;
 
 fn pair() -> (OwnedFd, UnixStream) {
@@ -7,9 +8,25 @@ fn pair() -> (OwnedFd, UnixStream) {
     (a.into(), b)
 }
 
+/// Whether our end of the pair has been closed, asked of the peer: once the
+/// last descriptor of our end is gone, the peer reads end-of-file.
+///
+/// The obvious check, `fcntl(raw, F_GETFD) == -1` with `EBADF`, races with
+/// every other test in this process. Tests run on parallel threads, and the
+/// kernel hands out the lowest free number, so another thread's socket or
+/// file can take `raw` between the close and the check (CI saw exactly that:
+/// `left: 1, right: -1`). The peer's view is tied to the socket, not to the
+/// number. The wait is bounded because a process another thread forked
+/// while our end was briefly inheritable holds a copy until it execs or exits.
+fn peer_sees_close(peer: &UnixStream) -> bool {
+    peer.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut byte = [0u8; 1];
+    matches!((&*peer).read(&mut byte), Ok(0))
+}
+
 #[test]
 fn adapter_sets_and_verifies_both_flags_before_returning() {
-    let (fd, _peer) = pair();
+    let (fd, peer) = pair();
     let raw = fd.as_raw_fd();
     // SAFETY: integer-only libc calls on a descriptor number this test owns or has just closed.
     unsafe {
@@ -24,16 +41,13 @@ fn adapter_sets_and_verifies_both_flags_before_returning() {
         assert_ne!(libc::fcntl(raw, libc::F_GETFD) & libc::FD_CLOEXEC, 0);
     }
     drop(configured);
-    // SAFETY: integer-only libc calls on a descriptor number this test owns or has just closed.
-    assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
-    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+    assert!(peer_sees_close(&peer), "dropping the configured descriptor closes it");
 }
 
 #[test]
 fn every_flag_operation_failure_closes_the_owned_descriptor() {
     for failure in 1..=6 {
-        let (fd, _peer) = pair();
-        let raw = fd.as_raw_fd();
+        let (fd, peer) = pair();
         let mut calls = 0;
         let result = configure_owned_with(fd, |fd, command, value| {
             calls += 1;
@@ -46,16 +60,14 @@ fn every_flag_operation_failure_closes_the_owned_descriptor() {
         });
         assert_eq!(result.unwrap_err().raw_os_error(), Some(libc::EIO));
         assert_eq!(calls, failure, "no retry after the first failure");
-        // SAFETY: integer-only libc calls on a descriptor number this test owns or has just closed.
-        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
-        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
+        assert!(peer_sees_close(&peer), "failure {failure} closes the owned descriptor");
     }
 }
 
 #[test]
 fn successful_noop_setters_cannot_return_an_unconfigured_fd() {
     for missing_command in [libc::F_SETFL, libc::F_SETFD] {
-        let (fd, _peer) = pair();
+        let (fd, peer) = pair();
         let raw = fd.as_raw_fd();
         // SAFETY: integer-only libc calls on a descriptor number this test owns or has just closed.
         unsafe {
@@ -68,8 +80,7 @@ fn successful_noop_setters_cannot_return_an_unconfigured_fd() {
             else { cvt(unsafe { libc::fcntl(fd, command, value) }) }
         });
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
-        // SAFETY: integer-only libc calls on a descriptor number this test owns or has just closed.
-        assert_eq!(unsafe { libc::fcntl(raw, libc::F_GETFD) }, -1);
+        assert!(peer_sees_close(&peer), "an unconfigured descriptor is closed, not returned");
     }
 }
 
